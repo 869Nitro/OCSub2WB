@@ -5,3 +5,5 @@ __pycache__/
 panel/__pycache__/
 panel/app_res.o
 *.tmp
+/OCSub2WB.exe
+dist/

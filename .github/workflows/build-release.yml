@@ -1,0 +1,70 @@
+name: Build and Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+
+      - name: Add MinGW to PATH
+        shell: pwsh
+        run: echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+
+      - name: Build panel
+        shell: cmd
+        run: panel\build.bat --ci
+
+      - name: Verify and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m py_compile ocgo_common.py opencode-go-proxy.py
+          if (!(Test-Path OCSub2WB.exe)) { throw "OCSub2WB.exe was not built" }
+          if ((Get-Item OCSub2WB.exe).Length -lt 400KB) { throw "OCSub2WB.exe is unexpectedly small" }
+          $deps = (& objdump -p OCSub2WB.exe | Select-String "DLL Name").Line
+          if ($deps -match "libgcc|libstdc\+\+|libwinpthread") { throw "non-static MinGW runtime dependency found" }
+
+          New-Item -ItemType Directory -Force dist\OCSub2WB | Out-Null
+          Copy-Item OCSub2WB.exe, opencode-go-proxy.py, ocgo_common.py, README.md, .env.example dist\OCSub2WB
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } else { "dev" }
+          $zip = "OCSub2WB-$tag-win64.zip"
+          Compress-Archive -Path dist\OCSub2WB -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Set-Content "$zip.sha256" -Encoding ascii
+          Get-Item $zip, "$zip.sha256" | Select-Object Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OCSub2WB-build
+          path: |
+            OCSub2WB-*.zip
+            OCSub2WB-*.zip.sha256
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            OCSub2WB-*.zip
+            OCSub2WB-*.zip.sha256
+          tag_name: ${{ github.event.release.tag_name }}

@@ -2,14 +2,19 @@
 
 让 WorkBuddy 用上 OpenCode Go 订阅额度，并带一个原生 Windows 托盘/控制面板。
 
-- 入口：`OCSub2WB.exe`（Win32，约 590KB，仓库包含）
+- 发布：GitHub Release 的便携 ZIP（exe + 两个 `.py` + README + `.env.example`）
 - 转发层：`opencode-go-proxy.py`，纯 Python 标准库，只监听 `127.0.0.1:8787`
 - 配置：`.env`（Key / 上游代理）+ `%USERPROFILE%\.workbuddy\models.json`（模型条目）
 - 运行期文件：`cache\`（日志、备份、token、pid）；`.env` 和 `cache/` 不入库
 - 当前版本：2.0；默认 UA：`workbuddy-opencode-proxy/2.0`
 
+> **前置依赖：必须先安装 WorkBuddy（Windows x64）。** 本桥复用 WorkBuddy 自带的
+> `pythonw.exe` 启动转发桥，不单独安装 Python。当前开发/验证版本：
+> `WorkBuddy-win32-x64-user-5.11.3.43806934-ecace0f7`；其它版本未逐一验证。
+> 升级 WorkBuddy 后如果 pythonw 路径变化，面板可能提示启动失败，需要重新确认。
+>
 > exe 不内嵌 Python，靠 WorkBuddy 自带的 `pythonw` 拉起 `opencode-go-proxy.py`，
-> 所以两个 `.py` 不能删。界面与文档统一称 OCSub2WB。
+> 所以 ZIP 里的两个 `.py` 不能删。界面与文档统一称 OCSub2WB。
 >
 > `OpenCodeGoPanel`（窗口类/互斥体）和 manifest 的 `OpenCodeGo.Panel` 是历史内部名，
 > 为了单实例和资源兼容保持不动，不是对外名称。
@@ -32,17 +37,20 @@ WorkBuddy ──POST /v1/chat/completions──▶ 127.0.0.1:8787
 
 ## 安装与首次配置
 
-1. 双击 `OCSub2WB.exe`。
-2. 点「启动转发桥」；Key 为空也能先启动，状态会显示 `● 转发桥运行中`。
-3. 选代理模式：直连可跳过；自动/手动填写 `http://IPv4:端口` 后点「应用」。
-4. 粘贴 `oc_sk_...` 到 Key 输入框，点「保存」。
-5. 点「一键配置」写入 WorkBuddy 模型。
-6. WorkBuddy → 设置 → 模型 → 选 OpenCode 分组，可用「测试已选模型」验证。
+1. 先安装 WorkBuddy（Windows x64；当前验证版本见顶部）。
+2. 从 GitHub Release 下载 `OCSub2WB-v2.0.0-win64.zip`，解压到任意父目录。
+   解压后应得到 `<父目录>\OCSub2WB\`，不要把 exe 单独拖出来。
+3. 双击 `OCSub2WB\OCSub2WB.exe`。
+4. 点「启动转发桥」；Key 为空也能先启动，状态会显示 `● 转发桥运行中`。
+5. 选代理模式：直连可跳过；自动/手动填写 `http://IPv4:端口` 后点「应用」。
+6. 粘贴 `oc_sk_...` 到 Key 输入框，点「保存」。
+7. 点「一键配置」写入 WorkBuddy 模型。
+8. WorkBuddy → 设置 → 模型 → 选 OpenCode 分组，可用「测试已选模型」验证。
 
 重启还原后：打开 exe → 启动转发桥 → 「一键配置」→ 选中模型点「测试已选模型」。
 
 重置只清 OC 托管条目时，自有模型会保留；`.env`、`cache/` 已在 `.gitignore` 中，
-不要提交。
+不要提交。私有仓库的 Release 下载需要登录有权限的 GitHub 账号。
 
 ## 面板
 
@@ -250,12 +258,15 @@ POST /api/shutdown          S: 先回 200，再异步退出
 
 ## 构建面板
 
+### 本地构建
+
 ```bat
 cd panel
 build.bat
 ```
 
-依赖 `D:\dev\mingw64`（GCC 16.2）。步骤：
+脚本优先使用 `MINGW` 环境变量或 PATH 里的 `g++`/`windres`，都没有时回退
+`D:\dev\mingw64\bin`。依赖 MinGW-w64（GCC 16.2 或兼容版本）。步骤：
 
 1. `windres app.rc` 生成 `app_res.o`（图标资源 ID 1）。
 2. g++ 编译 `ocgo_panel.cpp` + `app_res.o`，输出 `..\OCSub2WB.exe`。
@@ -263,6 +274,24 @@ build.bat
 
 mingw 的 specs 会强制注入默认清单，所以不能直接用 windres 写 manifest，否则会报
 "multiple non-default manifests"。构建前先退出正在运行的 `OCSub2WB.exe`，否则 exe 被占用。
+CI 使用 `build.bat --ci`，失败时不会 `pause`。
+
+### 云端构建与 Release
+
+仓库的 `.github/workflows/build-release.yml` 会在 `windows-latest` 上：
+
+1. 安装 MSYS2 MinGW 和 Python；
+2. 运行 `panel\build.bat --ci`；
+3. 校验 exe、Py 语法和静态依赖；
+4. 把 `OCSub2WB.exe`、两个 `.py`、README、`.env.example` 打进
+   `OCSub2WB-<tag>-win64.zip`，并生成 SHA256；
+5. 手动运行时上传 Actions artifact；发布 Release 时把 ZIP 和哈希挂到 Release。
+
+发布新版本：GitHub 仓库 → `Releases` → `Draft a new release` → 新建 tag
+`v2.0.0`（目标 `main`）→ 写标题/说明 → `Publish release`。
+workflow 跑完后，Release 资产会出现 ZIP 和 `.sha256`。
+首次使用前，在 `Settings → Actions → General → Workflow permissions` 选择
+`Read and write permissions`，否则上传 Release 资产会 403。
 
 ## 排错
 
@@ -285,6 +314,8 @@ mingw 的 specs 会强制注入默认清单，所以不能直接用 windres 写 
 ## 限制
 
 - 转发桥没起时该模型报连接失败，其它内置模型不受影响。
+- **必须安装 WorkBuddy（Windows x64）**；本桥复用 WorkBuddy 自带的 `pythonw`，不另装 Python。
+  当前验证版本 `WorkBuddy-win32-x64-user-5.11.3.43806934-ecace0f7`，其它版本未逐一验证。
 - 转发桥不存 Key、不写 Key 到日志；`.env` 与 models.json 里是明文（本机自用）。
 - C 盘重启还原后 models.json 会丢，打开面板点「一键配置」即可；`D:\dev` 与 `.env` 不受影响。
 - 不注册服务、不写全局环境变量、不开机自启。
@@ -300,11 +331,14 @@ mingw 的 specs 会强制注入默认清单，所以不能直接用 windres 写 
 
 | 文件 | 作用 |
 |---|---|
-| `OCSub2WB.exe` | 唯一入口（仓库包含） |
-| `opencode-go-proxy.py` | 转发 + 控制接口 |
-| `ocgo_common.py` | 唯一写盘者：env、上游代理探测、目录、models.json、额度、探测、自检 |
+| `OCSub2WB.exe` | Release 便携 ZIP 的入口；不提交进仓库 |
+| `opencode-go-proxy.py` | 转发 + 控制接口；ZIP 必须保留 |
+| `ocgo_common.py` | 唯一写盘者：env、上游代理探测、目录、models.json、额度、探测、自检；ZIP 必须保留 |
 | `panel/` | 面板源码、`app.rc`、图标、`build.bat`、manifest patch |
+| `.github/workflows/build-release.yml` | GitHub Actions 构建与 Release 上传 |
 | `.env` | `OPENCODE_API_KEY`、`OPENCODE_UPSTREAM_PROXY`、`OPENCODE_UPSTREAM_PROXY_URL`、`OPENCODE_NAME_PREFIX`；不入库 |
+| `.env.example` | 首次配置示例；会打进 Release ZIP |
+| `.gitattributes` | 保证 `.bat` 用 CRLF、exe 按二进制处理 |
 | `cache/` | `logs\`、`backup\`、`api.token`、`proxy.pid`；不入库 |
-| `.gitignore` | 忽略 `.env`、`cache/`、`__pycache__`、`panel/app_res.o`、`*.tmp` |
+| `.gitignore` | 忽略 `.env`、`cache/`、exe、dist、构建中间物 |
 | `README.md` | 本文件 |
