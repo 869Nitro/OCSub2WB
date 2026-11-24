@@ -38,7 +38,8 @@ WorkBuddy ──POST /v1/chat/completions──▶ 127.0.0.1:8787
 ## 安装与首次配置
 
 1. 先安装 WorkBuddy（Windows x64；当前验证版本见顶部）。
-2. 从 GitHub Release 下载 `OCSub2WB-v2.0.0-win64.zip`，解压到任意父目录。
+2. 从 [GitHub Releases](https://github.com/869Nitro/OCSub2WB/releases) 下载
+   `OCSub2WB-v2.0.0-win64.zip`，解压到任意父目录。
    解压后应得到 `<父目录>\OCSub2WB\`，不要把 exe 单独拖出来。
 3. 双击 `OCSub2WB\OCSub2WB.exe`。
 4. 点「启动转发桥」；Key 为空也能先启动，状态会显示 `● 转发桥运行中`。
