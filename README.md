@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" width="112" height="112" alt="OCSub2WB icon">
+</p>
+
 # OCSub2WB
 
 让 WorkBuddy 用上 OpenCode Go 订阅额度，并带一个原生 Windows 托盘/控制面板。
