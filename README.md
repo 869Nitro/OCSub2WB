@@ -20,6 +20,10 @@
 
 一键配置会填好接口地址。想先测某个模型，可以在 OCSub2WB 中选中它，再点「测试已选模型」。ZIP 的 SHA-256 校验文件也在[发布页](https://github.com/869Nitro/OCSub2WB/releases)。
 
+<p align="center">
+  <img src="./assets/panel.png" width="880" alt="OCSub2WB 面板，显示转发桥状态和两个示例模型">
+</p>
+
 ## 系统还原后
 
 重新安装并登录 WorkBuddy。便携目录还在的话，打开 OCSub2WB，点「启动转发桥」和「一键配置」。`.env` 还在就会沿用原来的 Key 和代理设置。便携目录或 `.env` 丢了，重新解压或填一次 Key 即可。
