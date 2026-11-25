@@ -22,6 +22,7 @@
 #include <commctrl.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -252,6 +253,7 @@ static void SetHintSticky(const std::wstring& text);
 static void UpdateModelGroupTitle(bool failed);
 static void ShowPanel();
 static void UpdateTrayTip();
+static void RefreshStatusAsync();
 
 // --------------------------------------------------------------------------- //
 // text helpers
@@ -713,48 +715,219 @@ static void PostQuotaDirect() {
     }).detach();
 }
 
-static std::wstring FindPythonw() {
-    wchar_t buf[MAX_PATH] = {};
-    const wchar_t* patterns[] = {
-        L"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\*\\pythonw.exe",
-    };
-    for (const wchar_t* pat : patterns) {
-        wchar_t expanded[MAX_PATH] = {};
-        ExpandEnvironmentStringsW(pat, expanded, MAX_PATH);
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(expanded, &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            std::wstring dir = expanded;
-            size_t pos = dir.find_last_of(L'\\');
-            if (pos != std::wstring::npos) {
-                std::wstring found = dir.substr(0, pos + 1) + fd.cFileName;
-                FindClose(h);
-                return found;
-            }
-            FindClose(h);
-        }
-    }
-    const wchar_t* vendor = L"D:\\Program_Files\\WorkBuddy\\resources\\vendor\\python\\pythonw.exe";
-    if (GetFileAttributesW(vendor) != INVALID_FILE_ATTRIBUTES) return vendor;
-    return L"pythonw.exe";
+// --------------------------------------------------------------------------- //
+// python runtime discovery
+// --------------------------------------------------------------------------- //
+
+enum LaunchState {
+    LAUNCH_NONE = 0,
+    LAUNCH_STARTING,
+    LAUNCH_ALREADY,
+    LAUNCH_PORT_BUSY,
+    LAUNCH_NO_RUNTIME,
+    LAUNCH_FAILED
+};
+
+static LaunchState g_launch_state = LAUNCH_NONE;
+static bool g_started_by_panel = false;
+static ULONGLONG g_launch_tick = 0;
+static const ULONGLONG kLaunchGraceMs = 15000;
+
+static bool FileExists(const std::wstring& path) {
+    if (path.empty()) return false;
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+static std::wstring ExpandEnvPath(const std::wstring& pattern) {
+    DWORD need = ExpandEnvironmentStringsW(pattern.c_str(), nullptr, 0);
+    if (need == 0) return pattern;
+    std::wstring out(need, L'\0');
+    DWORD got = ExpandEnvironmentStringsW(pattern.c_str(), &out[0], need);
+    if (got == 0 || got > need) return pattern;
+    out.resize(got - 1);
+    return out;
+}
+
+static std::wstring PathJoin(const std::wstring& dir, const std::wstring& name) {
+    if (dir.empty()) return name;
+    wchar_t last = dir[dir.size() - 1];
+    if (last == L'\\' || last == L'/') return dir + name;
+    return dir + L"\\" + name;
+}
+
+static std::wstring PythonIn(const std::wstring& dir) {
+    std::wstring direct = PathJoin(dir, L"pythonw.exe");
+    return FileExists(direct) ? direct : L"";
+}
+
+static std::wstring FindVersionedPython(const std::wstring& versions_dir) {
+    std::wstring pattern = PathJoin(versions_dir, L"*");
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return L"";
+    std::wstring found;
+    FILETIME newest = {};
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring candidate = PythonIn(PathJoin(versions_dir, fd.cFileName));
+        if (candidate.empty()) continue;
+        int order = CompareFileTime(&fd.ftLastWriteTime, &newest);
+        if (found.empty() || order > 0 || (order == 0 && candidate > found)) {
+            found = candidate;
+            newest = fd.ftLastWriteTime;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+static std::wstring PythonFromWorkBuddyProcess(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return L"";
+    wchar_t image[MAX_PATH];
+    DWORD length = ARRAYSIZE(image);
+    BOOL queried = QueryFullProcessImageNameW(process, 0, image, &length);
+    CloseHandle(process);
+    if (!queried) return L"";
+    std::wstring path(image, length);
+    size_t parent = path.find_last_of(L"\\/");
+    if (parent == std::wstring::npos) return L"";
+    return PythonIn(PathJoin(path.substr(0, parent), L"resources\\vendor\\python"));
+}
+
+static std::wstring FindRunningWorkBuddyPython() {
+    DWORD session = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) return L"";
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return L"";
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    std::wstring found;
+    for (BOOL more = Process32FirstW(snapshot, &entry); more;
+         more = Process32NextW(snapshot, &entry)) {
+        if (_wcsicmp(entry.szExeFile, L"WorkBuddy.exe") != 0) continue;
+        DWORD other_session = 0;
+        if (!ProcessIdToSessionId(entry.th32ProcessID, &other_session) || other_session != session)
+            continue;
+        found = PythonFromWorkBuddyProcess(entry.th32ProcessID);
+        if (!found.empty()) break;
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+static std::wstring FindPythonw() {
+    std::wstring found = FindVersionedPython(ExpandEnvPath(
+        L"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions"));
+    if (!found.empty()) return found;
+    found = FindRunningWorkBuddyPython();
+    if (!found.empty()) return found;
+
+    const wchar_t* install_dirs[] = {
+        L"%ProgramFiles%\\WorkBuddy\\resources\\vendor\\python",
+        L"%LOCALAPPDATA%\\Programs\\WorkBuddy\\resources\\vendor\\python",
+    };
+    for (const wchar_t* dir : install_dirs) {
+        found = PythonIn(ExpandEnvPath(dir));
+        if (!found.empty()) return found;
+    }
+    std::wstring search = ExpandEnvPath(L"%PATH%");
+    wchar_t resolved[MAX_PATH];
+    if (!search.empty() && search != L"%PATH%") {
+        DWORD length = SearchPathW(search.c_str(), L"pythonw.exe", nullptr,
+                                   ARRAYSIZE(resolved), resolved, nullptr);
+        if (length > 0 && length < ARRAYSIZE(resolved) && FileExists(resolved))
+            return std::wstring(resolved, length);
+    }
+    return L"";
+}
+
+// Keeps the launch outcomes distinguishable: started here, already running,
+// port 8787 busy, runtime missing, or CreateProcess failure.
 static void StartEngine() {
+    if (g_running) {
+        g_launch_state = LAUNCH_ALREADY;
+        SetText(IDC_STATUS, L"● 转发桥已在运行 · 端口 8787");
+        SetHintUser(L"转发桥已经在运行，无需重复启动");
+        RefreshStatusAsync();
+        return;
+    }
+    if (g_launch_state == LAUNCH_STARTING &&
+        GetTickCount64() - g_launch_tick < kLaunchGraceMs) {
+        SetText(IDC_STATUS, L"… 正在启动转发桥 · 端口 8787 ...");
+        SetHintUser(L"转发桥正在启动，请稍候 ...");
+        return;
+    }
+
+    g_launch_state = LAUNCH_NONE;
+    g_started_by_panel = false;
+    if (PortOpen(8787, 250)) {
+        int status = 0;
+        std::string body = HttpCall(L"GET", L"/api/status", "", 800, &status);
+        if (status == 200 && body.rfind("S ", 0) == 0) {
+            g_launch_state = LAUNCH_ALREADY;
+            SetText(IDC_STATUS, L"● 转发桥已在运行 · 端口 8787");
+            SetHintUser(L"转发桥已经在运行，无需重复启动");
+            RefreshStatusAsync();
+            return;
+        }
+        g_launch_state = LAUNCH_PORT_BUSY;
+        SetText(IDC_STATUS, L"✕ 端口 8787 已被其他程序占用");
+        SetHintUser(L"端口 8787 被占用，转发桥未启动");
+        MessageBoxW(g_hwnd,
+                    L"端口 8787 已被其他程序占用，转发桥未启动。\n\n"
+                    L"请关闭占用该端口的程序后重试。",
+                    L"OCSub2WB", MB_ICONWARNING);
+        return;
+    }
+
     std::wstring py = FindPythonw();
+    if (py.empty()) {
+        g_launch_state = LAUNCH_NO_RUNTIME;
+        SetText(IDC_STATUS, L"✕ 未找到 Python 运行时");
+        SetHintUser(L"缺少 pythonw.exe：请检查 WorkBuddy 用户目录或安装目录");
+        MessageBoxW(g_hwnd,
+                    L"未找到 pythonw.exe。请启动 WorkBuddy 后重试。\n\n"
+                    L"如果 WorkBuddy 已经打开，请检查它自带的 Python。",
+                    L"OCSub2WB", MB_ICONERROR);
+        return;
+    }
+
     std::wstring script = g_exe_dir + L"\\opencode-go-proxy.py";
+    if (!FileExists(script) || !FileExists(PathJoin(g_exe_dir, L"ocgo_common.py"))) {
+        g_launch_state = LAUNCH_FAILED;
+        SetText(IDC_STATUS, L"✕ 缺少转发桥脚本");
+        SetHintUser(L"请把压缩包里的两个 Python 文件放回 EXE 同一目录");
+        MessageBoxW(g_hwnd, L"请重新解压 ZIP。两个 Python 文件需要和 EXE 放在同一目录。",
+                    L"OCSub2WB", MB_ICONERROR);
+        return;
+    }
+
     std::wstring cmd = L"\"" + py + L"\" \"" + script + L"\"";
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     std::vector<wchar_t> mutable_cmd(cmd.begin(), cmd.end());
     mutable_cmd.push_back(L'\0');
-    if (CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
+    if (CreateProcessW(py.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE,
                        CREATE_NO_WINDOW, nullptr, g_exe_dir.c_str(), &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        SetWindowTextW(GetDlgItem(g_hwnd, IDC_STATUS), L"正在启动转发桥 ...");
-        SetHintUser(L"正在启动转发桥 ...");
+        g_launch_state = LAUNCH_STARTING;
+        g_started_by_panel = true;
+        g_launch_tick = GetTickCount64();
+        SetText(IDC_STATUS, L"… 正在启动转发桥 · 端口 8787 ...");
+        SetHintUser(L"已启动 pythonw.exe，正在等待端口 8787 就绪 ...");
     } else {
-        MessageBoxW(g_hwnd, (L"启动失败：" + py).c_str(), L"OCSub2WB", MB_ICONERROR);
+        DWORD err = GetLastError();
+        g_launch_state = LAUNCH_FAILED;
+        SetText(IDC_STATUS, L"✕ 转发桥启动失败");
+        SetHintUser(L"无法启动 pythonw.exe（错误 " + std::to_wstring(err) + L"）");
+        MessageBoxW(g_hwnd,
+                    (L"无法启动 pythonw.exe：\n" + py + L"\n\n系统错误码 " +
+                     std::to_wstring(err)).c_str(),
+                    L"OCSub2WB", MB_ICONERROR);
     }
 }
 
@@ -1973,7 +2146,38 @@ static void HandleStatus(const Resp* r) {
     g_status_busy = false;
     if (r->status != 200 || r->body.rfind("S ", 0) != 0) {
         g_running = false;
-        SetText(IDC_STATUS, L"○ 转发桥未运行");
+        // Keep "started by this panel" across the first polls while the
+        // engine is still booting; a later failure clears it.
+        if (g_launch_state != LAUNCH_STARTING)
+            g_started_by_panel = false;
+        if (g_launch_state == LAUNCH_STARTING &&
+            GetTickCount64() - g_launch_tick < kLaunchGraceMs) {
+            SetText(IDC_STATUS, L"… 正在启动转发桥 · 端口 8787 ...");
+            SetText(IDC_BTN_START, L"启动转发桥");
+            SetRelayOnly(false);
+            UpdateTrayTip();
+            return;
+        }
+        if (g_launch_state == LAUNCH_STARTING) {
+            g_launch_state = LAUNCH_FAILED;
+            SetHintUser(L"转发桥启动超时：端口 8787 未就绪，请查看日志");
+        } else if (g_launch_state == LAUNCH_ALREADY) {
+            g_launch_state = LAUNCH_NONE;
+        }
+        switch (g_launch_state) {
+            case LAUNCH_NO_RUNTIME:
+                SetText(IDC_STATUS, L"✕ 未找到 Python 运行时");
+                break;
+            case LAUNCH_PORT_BUSY:
+                SetText(IDC_STATUS, L"✕ 端口 8787 已被其他程序占用");
+                break;
+            case LAUNCH_FAILED:
+                SetText(IDC_STATUS, L"✕ 转发桥启动失败 · 端口 8787 未就绪");
+                break;
+            default:
+                SetText(IDC_STATUS, L"○ 转发桥未运行");
+                break;
+        }
         SetText(IDC_BTN_START, L"启动转发桥");
         SetRelayOnly(false);
         UpdateTrayTip();
@@ -1981,6 +2185,9 @@ static void HandleStatus(const Resp* r) {
     }
     auto kv = ParseKV(r->body);
     bool was_running = g_running;
+    bool just_started = (g_launch_state == LAUNCH_STARTING);
+    bool already_running = (g_launch_state == LAUNCH_ALREADY);
+    g_launch_state = LAUNCH_NONE;
     g_running = true;
     g_key_masked = kv["key"];
     SetRelayOnly(true);
@@ -1990,7 +2197,12 @@ static void HandleStatus(const Resp* r) {
     if (!was_running) {
         RefreshModelsAsync();
         RefreshLogAsync();
-        SetHintAuto(L"已连接");
+        if (just_started)
+            SetHintAuto(L"转发桥已启动");
+        else if (already_running)
+            SetHintAuto(L"转发桥已经在运行");
+        else
+            SetHintAuto(L"已连接");
     }
 
     // A restarted relay forgets its jobs; drop any stale poll immediately.
@@ -2019,7 +2231,9 @@ static void HandleStatus(const Resp* r) {
     else route = L"手动→" + proxy_url;
 
     std::wstring models_state = U8ToW(kv["models_state"]);
-    std::wstring text = L"● 转发桥运行中 · 端口 " + U8ToW(kv["port"]) +
+    std::wstring headline = g_started_by_panel ? L"● 转发桥已启动"
+                                               : L"● 转发桥已在运行";
+    std::wstring text = headline + L" · 端口 " + U8ToW(kv["port"]) +
                         L" · 上游 " + route +
                         L" · " + models + L" 个模型 · pid " + pid;
     if (models_state == L"recovered") text += L" · models.json 已回退备份";
