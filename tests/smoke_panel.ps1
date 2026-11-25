@@ -25,6 +25,49 @@ if (!(Test-Path -LiteralPath (Join-Path $runtime 'pythonw.exe') -PathType Leaf))
     throw 'The test Python distribution must include pythonw.exe'
 }
 
+# Substitute the public catalog in the child interpreter. The unpacked
+# application files remain byte-for-byte the ones in the release.
+$fixture = Join-Path $run 'upstream fixture'
+[IO.Directory]::CreateDirectory($fixture) | Out-Null
+$testUpstream = @'
+import http.client
+import json
+import os
+from pathlib import Path
+
+class CatalogReply:
+    status = 200
+
+    def getheaders(self):
+        return [("Content-Type", "application/json")]
+
+    def read(self):
+        return json.dumps({"data": [
+            {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash 1017",
+             "type": "chat", "limit": {"context": 1000000, "output": 384000},
+             "cost": {"text": {"input": 1, "output": 2}}},
+            {"id": "hy4-flash-free", "name": "Hy4 flash Free", "type": "chat",
+             "limit": {"context": 128000, "output": 16000},
+             "cost": {"text": {"input": 0, "output": 0}}},
+        ]}).encode("utf-8")
+
+class FixtureHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        raise OSError("Network disabled in the packaged panel test")
+
+    def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
+        if (self.host, method, url) != ("opencode.ai", "GET", "/inference/go/v1/models"):
+            raise OSError("Unexpected request in the packaged panel test")
+
+    def getresponse(self):
+        Path(os.environ["OCSUB2WB_CATALOG_MARKER"]).touch()
+        return CatalogReply()
+
+http.client.HTTPSConnection = FixtureHTTPSConnection
+'@
+[IO.File]::WriteAllText((Join-Path $fixture 'sitecustomize.py'), $testUpstream, [Text.UTF8Encoding]::new($false))
+$catalogMarker = Join-Path $run 'catalog-used'
+
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -41,6 +84,9 @@ public static class PanelSmoke {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     private static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr length,
         StringBuilder text, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode)]
+    private static extern IntPtr SendTextTimeout(IntPtr hwnd, uint msg, IntPtr wparam,
+        string text, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")]
@@ -60,6 +106,11 @@ public static class PanelSmoke {
         IntPtr result;
         SendMessageTimeout(GetDlgItem(hwnd, 1001), 0x000D, (IntPtr)text.Capacity, text, 2, 1000, out result);
         return text.ToString();
+    }
+    public static bool ClearLog(IntPtr hwnd) {
+        IntPtr result;
+        return SendTextTimeout(GetDlgItem(hwnd, 1051), 0x000C, IntPtr.Zero, "", 2, 1000, out result)
+            != IntPtr.Zero;
     }
 }
 "@
@@ -83,6 +134,8 @@ function New-Panel {
     $info.Environment['USERPROFILE'] = $profile
     $info.Environment['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
     $info.Environment['PYTHONDONTWRITEBYTECODE'] = '1'
+    $info.Environment['PYTHONPATH'] = $fixture
+    $info.Environment['OCSUB2WB_CATALOG_MARKER'] = $catalogMarker
     [Diagnostics.Process]::Start($info)
 }
 
@@ -102,6 +155,7 @@ function Save-PanelScreenshot([IntPtr]$Window) {
     if (!$ScreenshotPath) { return }
     try {
         Add-Type -AssemblyName System.Drawing
+        if (![PanelSmoke]::ClearLog($Window)) { throw 'Could not clear the fixture log from the preview' }
         $rect = [PanelSmoke+Rect]::new()
         if (![PanelSmoke]::GetWindowRect($Window, [ref]$rect)) { throw 'Window bounds unavailable' }
         $bitmap = [Drawing.Bitmap]::new(($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top))
@@ -157,6 +211,9 @@ try {
     }
     $null = Wait-Value 'the running status in the panel' {
         [PanelSmoke]::Status($window) -match '转发桥(已启动|已在运行|运行中)'
+    }
+    $null = Wait-Value 'a response from the simulated catalog' {
+        Test-Path -LiteralPath $catalogMarker
     }
 
     [void][PanelSmoke]::ShowWindow($window, 4)
