@@ -129,7 +129,7 @@ try {
     $panel = New-Panel
     $window = Wait-Value 'the packaged panel window' {
         if ($panel.HasExited) { throw "Panel exited with code $($panel.ExitCode)" }
-        $found = [PanelSmoke]::FindWindow('OpenCodeGoPanel', $null)
+        $found = [PanelSmoke]::FindWindow('OpenCodeGoPanel', 'OCSub2WB')
         if ([PanelSmoke]::Owns($found, [uint32]$panel.Id)) { $found }
     }
 
