@@ -16,6 +16,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -28,6 +30,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: MINGW64
           update: false
@@ -36,12 +39,14 @@ jobs:
       - name: Record MinGW versions
         shell: msys2 {0}
         run: |
-          pacman -Q | awk '/^mingw-w64-x86_64-(gcc|gcc-libs|cc-libs|crt|crt-git|winpthreads|libwinpthread) /'
+          pacman -Q | awk '/^mingw-w64-x86_64-(gcc|gcc-libs|cc-libs|libgcc|libstdc[+][+]|crt|crt-git|winpthreads|libwinpthread) /'
           g++ -dumpfullversion
 
       - name: Add MinGW to PATH
         shell: pwsh
-        run: Add-Content -LiteralPath $env:GITHUB_PATH -Value 'C:\msys64\mingw64\bin'
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:MSYS2_LOCATION 'mingw64\bin')
 
       - name: Build control panel
         shell: cmd
@@ -49,6 +54,8 @@ jobs:
 
       - name: Verify and package
         shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $format = & objdump -f OCSub2WB.exe
           if ($LASTEXITCODE -ne 0 -or ($format -join ' ') -notmatch 'pei-x86-64') {
@@ -69,7 +76,7 @@ jobs:
           }
           Copy-Item -LiteralPath licenses -Destination $package -Recurse
 
-          $msysLicenses = 'C:\msys64\mingw64\share\licenses'
+          $msysLicenses = Join-Path $env:MSYS2_LOCATION 'mingw64\share\licenses'
           $installed = @{
             'MinGW-w64-COPYING.txt' = 'crt\COPYING'
             'MinGW-w64-headers-notices.txt' = 'crt\COPYING.MinGW-w64.txt'

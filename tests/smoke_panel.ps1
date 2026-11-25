@@ -140,6 +140,9 @@ try {
     }
     if ([PanelSmoke]::Status($window) -notmatch '8787.*占用') { throw 'Panel did not report the occupied port' }
     Send-PanelMessage $alert 0x0010
+    $null = Wait-Value 'the occupied-port alert to close' {
+        ![PanelSmoke]::Owns([PanelSmoke]::FindWindow('#32770', 'OCSub2WB'), [uint32]$panel.Id)
+    }
     $busy.Stop()
 
     Send-PanelMessage $window 0x0111 1002
