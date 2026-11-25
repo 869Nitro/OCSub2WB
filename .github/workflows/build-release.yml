@@ -1,12 +1,15 @@
-name: Build and Release
+name: Windows build and release draft
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -16,7 +19,13 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
+
+      - name: Run offline Python tests
+        shell: pwsh
+        run: |
+          python -B -m unittest discover -s tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -24,49 +33,111 @@ jobs:
           update: false
           install: mingw-w64-x86_64-gcc
 
+      - name: Record MinGW versions
+        shell: msys2 {0}
+        run: |
+          pacman -Q mingw-w64-x86_64-gcc mingw-w64-x86_64-gcc-libs mingw-w64-x86_64-crt mingw-w64-x86_64-winpthreads
+          g++ -dumpfullversion
+
       - name: Add MinGW to PATH
         shell: pwsh
-        run: echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+        run: Add-Content -LiteralPath $env:GITHUB_PATH -Value 'C:\msys64\mingw64\bin'
 
-      - name: Build panel
+      - name: Build control panel
         shell: cmd
         run: panel\build.bat --ci
 
       - name: Verify and package
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          python -m py_compile ocgo_common.py opencode-go-proxy.py
-          if (!(Test-Path OCSub2WB.exe)) { throw "OCSub2WB.exe was not built" }
-          if ((Get-Item OCSub2WB.exe).Length -lt 400KB) { throw "OCSub2WB.exe is unexpectedly small" }
-          $deps = (& objdump -p OCSub2WB.exe | Select-String "DLL Name").Line
-          if ($deps -match "libgcc|libstdc\+\+|libwinpthread") { throw "non-static MinGW runtime dependency found" }
+          $format = & objdump -f OCSub2WB.exe
+          if ($LASTEXITCODE -ne 0 -or ($format -join ' ') -notmatch 'pei-x86-64') {
+            throw 'Expected a Windows x64 EXE'
+          }
+          $imports = & objdump -p OCSub2WB.exe | Select-String 'DLL Name:'
+          if ($LASTEXITCODE -ne 0 -or ($imports -join ' ') -match 'DLL Name:\s*(libgcc|libstdc\+\+|libwinpthread)') {
+            throw 'Unable to verify static MinGW runtime linkage'
+          }
+          $imports | ForEach-Object { $_.Line.Trim() }
 
-          New-Item -ItemType Directory -Force dist\OCSub2WB | Out-Null
-          New-Item -ItemType Directory -Force dist\OCSub2WB\assets | Out-Null
-          Copy-Item OCSub2WB.exe, opencode-go-proxy.py, ocgo_common.py, README.md, .env.example dist\OCSub2WB
-          Copy-Item assets\icon.png dist\OCSub2WB\assets\icon.png
-          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } else { "dev" }
-          $zip = "OCSub2WB-$tag-win64.zip"
-          Compress-Archive -Path dist\OCSub2WB -DestinationPath $zip -Force
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  $zip" | Set-Content "$zip.sha256" -Encoding ascii
-          Get-Item $zip, "$zip.sha256" | Select-Object Name, Length
+          $package = 'dist\OCSub2WB'
+          [IO.Directory]::CreateDirectory("$package\assets") | Out-Null
+          Copy-Item -LiteralPath OCSub2WB.exe,opencode-go-proxy.py,ocgo_common.py,README.md,LICENSE,THIRD-PARTY-NOTICES.md,.env.example -Destination $package
+          Copy-Item -LiteralPath assets\icon.png -Destination "$package\assets"
+          if (Test-Path -LiteralPath 'assets\panel.png') {
+            Copy-Item -LiteralPath assets\panel.png -Destination "$package\assets"
+          }
+          Copy-Item -LiteralPath licenses -Destination $package -Recurse
 
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+          $msysLicenses = 'C:\msys64\mingw64\share\licenses'
+          $installed = @{
+            'MinGW-w64-COPYING.txt' = 'crt\COPYING'
+            'MinGW-w64-headers-notices.txt' = 'crt\COPYING.MinGW-w64.txt'
+            'MinGW-w64-runtime-notices.txt' = 'crt\COPYING.MinGW-w64-runtime.txt'
+            'winpthreads-COPYING.txt' = 'winpthreads\COPYING'
+          }
+          foreach ($name in $installed.Keys) {
+            Copy-Item -LiteralPath (Join-Path $msysLicenses $installed[$name]) -Destination "$package\licenses\$name"
+          }
+
+          $version = 'dev'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME
+            if ($version -notmatch '^v[0-9][A-Za-z0-9._+-]*$') { throw 'Invalid release tag' }
+          }
+          $zip = "OCSub2WB-$version-win64.zip"
+          Compress-Archive -LiteralPath $package -DestinationPath $zip
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "OCSUB2WB_ZIP=$zip"
+
+      - name: Test the unpacked panel
+        shell: pwsh
+        run: ./tests/smoke_panel.ps1 -Zip $env:OCSUB2WB_ZIP -ScreenshotPath (Join-Path $env:RUNNER_TEMP 'panel-preview.png')
+
+      - uses: actions/upload-artifact@v4
         with:
           name: OCSub2WB-build
           path: |
-            OCSub2WB-*.zip
-            OCSub2WB-*.zip.sha256
+            ${{ env.OCSUB2WB_ZIP }}
+            ${{ env.OCSUB2WB_ZIP }}.sha256
           if-no-files-found: error
 
-      - name: Upload release assets
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
-            OCSub2WB-*.zip
-            OCSub2WB-*.zip.sha256
-          tag_name: ${{ github.event.release.tag_name }}
+          name: panel-preview
+          path: ${{ runner.temp }}/panel-preview.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+  draft:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: OCSub2WB-build
+
+      - name: Create or update the draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = "OCSub2WB-$tag-win64.zip"
+          $expected = ((Get-Content -LiteralPath "$zip.sha256" -Raw).Trim() -split '\s+')[0]
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $expected) {
+            throw 'Release asset SHA-256 does not match'
+          }
+          $draft = gh release view $tag --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if ($draft -ne 'true') { throw 'The release is already published' }
+            gh release upload $tag $zip "$zip.sha256" --clobber
+          } else {
+            gh release create $tag $zip "$zip.sha256" --verify-tag --draft --title $tag --notes-from-tag
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
