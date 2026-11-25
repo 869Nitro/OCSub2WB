@@ -36,7 +36,7 @@ jobs:
       - name: Record MinGW versions
         shell: msys2 {0}
         run: |
-          pacman -Q mingw-w64-x86_64-gcc mingw-w64-x86_64-gcc-libs mingw-w64-x86_64-crt mingw-w64-x86_64-winpthreads
+          pacman -Q | awk '/^mingw-w64-x86_64-(gcc|gcc-libs|cc-libs|crt|crt-git|winpthreads|libwinpthread) /'
           g++ -dumpfullversion
 
       - name: Add MinGW to PATH
