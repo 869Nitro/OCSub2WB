@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-opencode-go-proxy 2.0
+opencode-go-proxy
 
 A tiny loopback relay that lets any OpenAI-Chat-Completions client (WorkBuddy,
 Trae, Cline, ...) talk to the OpenCode Go / Console gateway.
@@ -43,11 +43,11 @@ from urllib.parse import urlsplit, parse_qs
 
 import ocgo_common as oc
 
-VERSION = "2.0"
+VERSION = oc.VERSION
 API_VERSION = 2
-DEFAULT_PORT = 8787
+DEFAULT_PORT = oc.DEFAULT_PORT
 DEFAULT_UPSTREAM = "https://opencode.ai/inference/go"
-DEFAULT_UA = "workbuddy-opencode-proxy/2.0 (+windows; local)"
+DEFAULT_UA = oc.USER_AGENT
 FALLBACK_SESSION = "ses_wb_fallback"
 MAX_STREAM_BYTES = 8 * 1024 * 1024  # don't parse bodies larger than this
 CONNECT_TIMEOUT = 10.0
@@ -267,6 +267,7 @@ class Config:
     port = DEFAULT_PORT
     scheme = "https"
     host = "opencode.ai"
+    upstream_port = 0  # 0 -> scheme default (443/80)
     base_path = "/inference/go"
     session_mode = "auto"
     fixed_session = FALLBACK_SESSION
@@ -512,17 +513,18 @@ class RelayHandler(BaseHTTPRequestHandler):
         a CONNECT tunnel, so retry semantics are unchanged.
         """
         tunnel = oc.parse_proxy(proxy) if proxy else None
+        use_tls = Config.scheme == "https"
+        port = Config.upstream_port or (443 if use_tls else 80)
+        connection = http.client.HTTPSConnection if use_tls else http.client.HTTPConnection
         last: Exception | None = None
         for attempt in (0, 1):
             if tunnel:
                 phost, pport, pauth = tunnel
-                conn = http.client.HTTPSConnection(phost, pport, timeout=CONNECT_TIMEOUT)
+                conn = connection(phost, pport, timeout=CONNECT_TIMEOUT)
                 tunnel_headers = {"Proxy-Authorization": pauth} if pauth else {}
-                conn.set_tunnel(Config.host, 443, headers=tunnel_headers)
-            elif Config.scheme == "https":
-                conn = http.client.HTTPSConnection(Config.host, 443, timeout=CONNECT_TIMEOUT)
+                conn.set_tunnel(Config.host, port, headers=tunnel_headers)
             else:
-                conn = http.client.HTTPConnection(Config.host, 80, timeout=CONNECT_TIMEOUT)
+                conn = connection(Config.host, port, timeout=CONNECT_TIMEOUT)
             try:
                 conn.connect()
             except (OSError, ssl.SSLError) as exc:
@@ -578,7 +580,10 @@ class RelayHandler(BaseHTTPRequestHandler):
                 continue
             headers[lower] = value
 
-        headers["host"] = Config.host
+        host = f"[{Config.host}]" if ":" in Config.host else Config.host
+        default_port = 443 if Config.scheme == "https" else 80
+        port = Config.upstream_port or default_port
+        headers["host"] = host if port == default_port else f"{host}:{port}"
         headers["x-opencode-session"] = session
         headers["user-agent"] = Config.user_agent
         headers["accept-encoding"] = "identity"
@@ -919,31 +924,40 @@ class RelayHandler(BaseHTTPRequestHandler):
                 except Exception:  # noqa: BLE001
                     self._text(401, f"E key rejected {type(exc).__name__}")
                     return
-            old_env = ""
+            env_path = oc.ENV_PATH
             try:
-                with open(oc.ENV_PATH, "r", encoding="utf-8-sig") as fh:
+                with open(env_path, "rb") as fh:
                     old_env = fh.read()
-            except OSError:
-                pass
+            except FileNotFoundError:
+                old_env = None
+            except OSError as exc:
+                self._text(500, f"E key read env {type(exc).__name__}")
+                return
+
+            def restore_env() -> None:
+                try:
+                    if old_env is None:
+                        os.remove(env_path)
+                    else:
+                        tmp = env_path + ".tmp"
+                        with open(tmp, "wb") as fh:
+                            fh.write(old_env)
+                        os.replace(tmp, env_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:  # noqa: BLE001
+                    Config.log.write(
+                        f"api_key env_restore_failed {type(exc).__name__}")
+
             try:
                 oc.write_env({"OPENCODE_API_KEY": key})
                 changed = oc.update_models_key(key)
             except oc.ModelsRecoveryRequired as exc:
-                if old_env:
-                    try:
-                        with open(oc.ENV_PATH, "w", encoding="utf-8", newline="\n") as fh:
-                            fh.write(old_env)
-                    except OSError:
-                        pass
+                restore_env()
                 self._text(409, f"E recovery {exc}")
                 return
             except Exception as exc:  # noqa: BLE001
-                if old_env:
-                    try:
-                        with open(oc.ENV_PATH, "w", encoding="utf-8", newline="\n") as fh:
-                            fh.write(old_env)
-                    except OSError:
-                        pass
+                restore_env()
                 self._text(500, f"E key persist {type(exc).__name__} {exc}")
                 return
             with Config.lock:
@@ -1207,10 +1221,18 @@ def main(argv: list[str]) -> int:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         safe_print(f"invalid --upstream: {args.upstream}", err=True)
         return 2
+    try:
+        upstream_port = parsed.port
+        if upstream_port == 0:
+            raise ValueError("upstream port must be positive")
+    except ValueError:
+        safe_print(f"invalid --upstream port: {args.upstream}", err=True)
+        return 2
 
     Config.port = args.port
     Config.scheme = parsed.scheme
     Config.host = parsed.hostname
+    Config.upstream_port = upstream_port or 0
     Config.base_path = parsed.path.rstrip("/")
     Config.session_mode = args.session
     Config.fixed_session = args.fixed_session or env.get(
@@ -1222,7 +1244,7 @@ def main(argv: list[str]) -> int:
     Config.log = RequestLog(args.log_dir)
     Config.models_count = oc.managed_count()
 
-    if port_in_use(args.port):
+    if args.port and port_in_use(args.port):
         safe_print(f"[opencode-go-proxy] 127.0.0.1:{args.port} is already in use.")
         safe_print("  Another instance is probably running. Close it first, or pick --port.")
         Config.log.write(f"proxy_start_denied port={args.port} already_in_use")
@@ -1233,6 +1255,10 @@ def main(argv: list[str]) -> int:
     except OSError as exc:
         safe_print(f"[opencode-go-proxy] cannot bind 127.0.0.1:{args.port}: {exc}")
         return 3
+
+    # --port 0 lets the OS pick a free port; everything user-visible
+    # (status, health, banner, one-click models.json URLs) must use that port.
+    Config.port = server.server_address[1]
 
     write_pid_file(args.pid_file)
 
@@ -1253,7 +1279,7 @@ def main(argv: list[str]) -> int:
         threading.Thread(target=refresh_limited, daemon=True, name="limited-refresh").start()
 
     banner = (
-        f"opencode-go-proxy {VERSION} listening on http://127.0.0.1:{args.port}\n"
+        f"opencode-go-proxy {VERSION} listening on http://127.0.0.1:{Config.port}\n"
         f"  upstream      : {args.upstream}\n"
         f"  outbound      : {Config.upstream_mode} ({Config.proxy_url or 'direct'})\n"
         f"  session mode  : {Config.session_mode}"
@@ -1263,7 +1289,7 @@ def main(argv: list[str]) -> int:
         f"  logs          : {args.log_dir}\n"
         f"  pid file      : {args.pid_file}\n"
         f"  api token     : {args.token_file}\n"
-        f"  WorkBuddy URL : http://127.0.0.1:{args.port}/v1\n"
+        f"  WorkBuddy URL : http://127.0.0.1:{Config.port}/v1\n"
         f"  Ctrl+C to stop."
     )
     safe_print(banner)
