@@ -1,349 +1,191 @@
-<p align="center">
-  <img src="assets/icon.png" width="112" height="112" alt="OCSub2WB icon">
-</p>
+<div align="center">
+  <img src="./assets/icon.png" width="88" height="88" alt="OCSub2WB">
+  <h1>OCSub2WB</h1>
+  <p>让 WorkBuddy 使用 OpenCode Go 订阅额度的 Windows 本地转发桥</p>
+  <p>
+    <a href="https://github.com/869Nitro/OCSub2WB/releases/download/v2.0.0/OCSub2WB-v2.0.0-win64.zip"><strong>下载 v2.0.0 · Windows x64</strong></a>
+    &nbsp;·&nbsp; <a href="#快速开始">快速开始</a>
+    &nbsp;·&nbsp; <a href="#常见问题">常见问题</a>
+  </p>
+</div>
 
-# OCSub2WB
+## 快速开始
 
-让 WorkBuddy 用上 OpenCode Go 订阅额度，并带一个原生 Windows 托盘/控制面板。
+已验证的 WorkBuddy 版本为 `5.11.3.43806934-ecace0f7`（Windows x64）。面板复用 WorkBuddy 自带的 `pythonw.exe`，日常使用无需单独安装 Python。
 
-- 发布：GitHub Release 的便携 ZIP（exe + 两个 `.py` + README + `.env.example`）
-- 转发层：`opencode-go-proxy.py`，纯 Python 标准库，只监听 `127.0.0.1:8787`
-- 配置：`.env`（Key / 上游代理）+ `%USERPROFILE%\.workbuddy\models.json`（模型条目）
-- 运行期文件：`cache\`（日志、备份、token、pid）；`.env` 和 `cache/` 不入库
-- 当前版本：2.0；默认 UA：`workbuddy-opencode-proxy/2.0`
+1. **启动并登录 WorkBuddy。**
+2. **下载并解压便携包。** 双击解压目录中的 `OCSub2WB.exe`，将同目录的两个 `.py` 文件随 EXE 一起保留。私有仓库的下载链接需要登录有访问权限的 GitHub 账号。
+3. **点「启动转发桥」。** 面板显示「转发桥运行中」后即可继续。
+4. **保存 OpenCode API Key。** 粘贴 `oc_sk_…` 并点「保存」。需要通过 Clash 等代理访问上游时，按[上游代理](#上游代理)设置。
+5. **点「一键配置」。** 打开 WorkBuddy 的「设置 → 模型」，从 OpenCode 分组选择模型即可。面板会自动写入接口地址。
 
-> **前置依赖：必须先安装 WorkBuddy（Windows x64）。** 本桥复用 WorkBuddy 自带的
-> `pythonw.exe` 启动转发桥，不单独安装 Python。当前开发/验证版本：
-> `WorkBuddy-win32-x64-user-5.11.3.43806934-ecace0f7`；其它版本未逐一验证。
-> 升级 WorkBuddy 后如果 pythonw 路径变化，面板可能提示启动失败，需要重新确认。
->
-> exe 不内嵌 Python，靠 WorkBuddy 自带的 `pythonw` 拉起 `opencode-go-proxy.py`，
-> 所以 ZIP 里的两个 `.py` 不能删。界面与文档统一称 OCSub2WB。
->
-> `OpenCodeGoPanel`（窗口类/互斥体）和 manifest 的 `OpenCodeGo.Panel` 是历史内部名，
-> 为了单实例和资源兼容保持不动，不是对外名称。
->
-> 上游路径固定为 `/inference/go`，与套餐无关，本文档不讨论套餐。
+想验证某个模型时，在 **OCSub2WB 面板**选中对应行，点击「测试已选模型」。
 
-## 为什么需要转发层
+[所有版本](https://github.com/869Nitro/OCSub2WB/releases) · [v2.0.0 SHA-256 校验文件](https://github.com/869Nitro/OCSub2WB/releases/download/v2.0.0/OCSub2WB-v2.0.0-win64.zip.sha256)
 
-网关要求请求带 `x-opencode-session`，否则 `400 MissingSessionID`。
-WorkBuddy 自定义模型只能填「模型名称 / 接口地址 / API Key」，没有自定义请求头入口。
-所以由本地转发桥补头，其余字节原样转发：
+### 系统还原后
 
-```
-WorkBuddy ──POST /v1/chat/completions──▶ 127.0.0.1:8787
-                                            │ + x-opencode-session
-                                            │ + user-agent
-                                            ▼
-                     https://opencode.ai/inference/go/openai/v1/chat/completions
-```
+如果系统还原移除了 WorkBuddy，先重新安装并登录。若便携目录和 `.env` 仍在，打开 OCSub2WB，启动转发桥，再点「一键配置」。已保存的 Key 可以直接沿用。
 
-## 安装与首次配置
+## 日常操作
 
-1. 先安装 WorkBuddy（Windows x64；当前验证版本见顶部）。
-2. 从 [GitHub Releases](https://github.com/869Nitro/OCSub2WB/releases) 下载
-   `OCSub2WB-v2.0.0-win64.zip`，解压到任意父目录。
-   解压后应得到 `<父目录>\OCSub2WB\`，不要把 exe 单独拖出来。
-3. 双击 `OCSub2WB\OCSub2WB.exe`。
-4. 点「启动转发桥」；Key 为空也能先启动，状态会显示 `● 转发桥运行中`。
-5. 选代理模式：直连可跳过；自动/手动填写 `http://IPv4:端口` 后点「应用」。
-6. 粘贴 `oc_sk_...` 到 Key 输入框，点「保存」。
-7. 点「一键配置」写入 WorkBuddy 模型。
-8. WorkBuddy → 设置 → 模型 → 选 OpenCode 分组，可用「测试已选模型」验证。
+| 操作 | 用途 |
+| --- | --- |
+| **一键配置** | 从目录重建 OCSub2WB 托管的聊天模型条目，包含免费模型，保留自有模型。 |
+| **探测免费模型** | 按当前路由探测每个免费模型，显示可用状态或失败原因。 |
+| **导入列表至WB** | 重建托管条目，导入目录中的付费聊天模型，并只纳入探测返回 HTTP 200 的免费模型。 |
+| **测试已选模型** | 手动测试一个模型，显示转发桥、目录、普通对话、流式对话和计费信息。 |
+| **刷新模型状态** | 刷新模型表和 WorkBuddy 导入标记。目录可能来自缓存，此操作只读。 |
+| **清空WB列表** | 备份后移除托管条目，保留自有模型。转发桥未启动时也可以执行。 |
 
-重启还原后：打开 exe → 启动转发桥 → 「一键配置」→ 选中模型点「测试已选模型」。
+表中前五项需要转发桥运行。点表头可排序，表格文字可选中并用 Ctrl+C 复制。模型表通过「规则」列显示免费、付费、训练、锁区及 ZDR 标记。单模型测试最多发送两次小型对话请求，普通对话失败时会跳过流式测试。
 
-重置只清 OC 托管条目时，自有模型会保留；`.env`、`cache/` 已在 `.gitignore` 中，
-不要提交。私有仓库的 Release 下载需要登录有权限的 GitHub 账号。
+面板另有 **额度** 和 **日志**。额度显示 5 小时、本周、本月用量与重置时间，转发桥停着也能刷新。日志可查看最近 250 行，每 6 秒刷新。
 
-## 面板
-
-| 区域 | 功能 |
-|---|---|
-| 顶部 | 运行状态、端口、上游模式、Key 掩码、pid；启动/停止转发桥、打开缓存目录、退出 |
-| 额度 | 左侧 5 小时 / 本周 / 本月标签，右侧只显示百分比与重置时间；面板按 `.env` 的 Key 直接请求上游，转发桥没启动也能看 |
-| 模型 | 实时目录（当前约 31 个 chat，以实时目录为准）；「规则」列标注免费/付费、训练、锁区、ZDR；点任意表头排序 |
-| 模型操作 | `一键配置`、`探测免费模型`、`导入列表至WB`、`测试已选模型`、`刷新模型状态`、`清空WB列表` |
-| Key | 粘贴新 `oc_sk_...` → 校验 → 写 `.env` 并改写全部托管条目，WorkBuddy 热加载生效 |
-| 上游代理 | 直连 / 自动（仅锁区走代理）/ 手动（全部走代理） |
-| 日志 | 尾 250 行，6 秒刷新 |
-
-### 模型表
-
-- 列宽自动计算：按表头（含排序箭头）和当前单元格内容取最大宽度，再按 DPI 加内边距。
-- 模型 id 是弹性列：其余列优先完整显示；空间不足时 id 先压到只够显示「模型 id」，
-  仍放不下则保持其它列完整并出现横向滚动条。
-- 点表头排序：文本列按拼音，上下文/输出按数值，档位按档位数量；再点同列切换升降序，
-  探测列空值始终排最后。选中行按 id 保留，「测试已选模型」不会测错行。
-- 表格文字可左键拖选，Ctrl+C 复制；单元格之间 Tab、行之间换行，粘进 Excel 自动分列。
-
-### 六个模型按钮
-
-前五个依赖转发桥：未启动时置灰，鼠标悬停提示「需启动转发桥」。
-`清空WB列表` 不依赖转发桥——它只改 WorkBuddy 的 models.json，转发桥没起时会调用
-一次性本地进程完成，写前同样备份。
-
-「模型」分组标题显示 `N 托管 / N 可选 / N 免费`。六个模型操作按钮产生的临时结果/进度
-显示在按钮行右侧，保留到下一次按钮操作，不会被状态轮询、模型刷新或自动错误覆盖；
-代理、Key、启停等其它操作仍走普通提示，可随时更新。
-
-**刷新模型状态**：只读 `GET /api/models`，重新拉上游目录并读取 WorkBuddy 的导入标记，
-刷新面板表格；它不写 models.json、不导入模型、不刷新下游 WorkBuddy。
-真正会改 WB 的是「一键配置」「导入列表至WB」「清空WB列表」。
-
-**测试已选模型（只手动、单模型）**：先在列表里选中一行（不选则测第一行），点「测试已选模型」。
-只测这一个模型，最多 2 次很小的请求：非流式 + 流式；`chat` 不通就不再打 `stream`。
-结果逐项显示 `relay / catalog / chat / stream / billing` 的通过/失败/跳过与原因。
-
-**自检**按目录下发的思考能力取最低档：原始 effort 含 `none` 就直接发 `none`；
-可切换思考就省略 `reasoning_effort`；只能思考则取支持的最低档（minimal→low→…）。
-自检与正在进行的对话并发执行，不会中断或阻塞输出；不会巡检整个目录，也没有定时自检。
-
-**清空WB列表**：删除全部托管条目（`vendor=OpenCode` 或 `url=127.0.0.1:8787`），
-自有模型保留，不重建。平时用「一键配置」即可，它内部也是先删后写、一次落盘。
-
-### 额度
-
-面板直接读 `.env` 的 `OPENCODE_API_KEY` 请求 `inference/go/v1/usage`，不经过转发桥。
-直连失败再按 `OPENCODE_UPSTREAM_PROXY`（off/auto/URL）回退。
-错误会区分 `未配置 API Key` / `Key 无效` / `无有效订阅` / `网络不通`；
-有上次数据时保留并在前面标 ⚠。
-
-### 退出
-
-`X` 收起到托盘（不退出进程）；托盘菜单可「隐藏/打开面板」或「退出并停止转发桥」；
-`[退出]` 二次确认后停桥，并等端口真正释放（≤3s）才关窗。
-
-托盘图标属于面板进程，所以不提供“只退面板、保留托盘”的选项——需要保留托盘就用隐藏。
-
-## 系统托盘
-
-- 单击托盘图标恢复面板；右键菜单：隐藏/打开面板、启动/停止转发桥、
-  代理模式（直连/自动/手动）、退出并停止转发桥。
-- 鼠标悬浮显示转发状态：运行中/未运行、端口、当前代理模式。
-- 第一次点 `X` 会弹一次「已收起到托盘」，之后静默。
-- Explorer 重启后图标自动重建。
-
-## 模型命名
-
-付费与免费各一套前缀，免费自动派生，不需要额外配置：
-
-```
-[OC] DeepSeek V4.1 Flash 1017    id: deepseek-v4.1-flash
-[OC] GLM-5.3                     id: glm-5.3
-[OC-FREE] Beam Free              id: beam-free
-[OC-FREE] Hy4 flash Free         id: hy4-flash-free
-```
-
-名称直接用上游 `name`，不删末尾数字、不拼接训练/锁区备注；训练与锁区看面板「规则」列。
-若加上前缀后仍然完全同名（同付费状态），才在名称末尾追加 `（<id>）` 区分。
-
-派生规则：在基础前缀的第一个 `]` 前插入 `-FREE`（`[OC] ` → `[OC-FREE] `）。
-前缀可用 `.env` 覆盖，**必须带引号**否则尾随空格会被吃掉：
-
-```
-OPENCODE_NAME_PREFIX="[OC] "
-```
-
-`id` 永远是网关 id，前缀只影响显示。
-
-## 字段来源
-
-models.json 的能力字段来自 OCG 目录声明，**不做行为探测**：
-
-| 字段 | 来源 |
-|---|---|
-| 上下文 / 最大输出 | `limit.context` / `limit.output`；缺失时面板显示 `—`，不写 0 |
-| 免费 / 付费 | `cost.text.input/output`（以及 `cache.read`）是否全为 0；cost 缺失才看 `-free` |
-| 图片 | `modalities.input` 含 `image/*`（WorkBuddy 只有图片开关，PDF 无处可放） |
-| 工具调用 | `capabilities.tools.supported` |
-| 协议 / 端点 | 转发桥统一走 OpenAI Chat Completions，网关按模型翻译，不写进条目 |
-
-### 思考能力
-
-`capabilities.reasoning` 按三态处理：
-
-- 明确 `toggle=true`，或 `effort` 含 `none/off`：可切换，写
-  `supportedEfforts` + `canDisableThinking:true`。
-- 有 `effort` 但缺 `toggle`：视为未知，**省略** `canDisableThinking`/`onlyReasoning`，
-  由 WorkBuddy 默认显示开关。
-- 无 `effort` 且无 `toggle`：强制思考，写 `supportedEfforts: []` +
-  `canDisableThinking:false` + `onlyReasoning:true`。
-- 有 effort 时 `defaultEffort` 取最高档；`budget` 只是 token 上限，不作为档位。
-
-面板显示：
-
-- 思考列：`强制` / `切换` / `无`
-- 档位列：有 effort 显示列表；可切换但无 effort 显示 `on-off`；
-  强制/无思考显示 `Fixed`
-- `on-off` / `Fixed` 仅面板显示，不写入 models.json，也不发给 WorkBuddy
-
-## 免费模型
-
-实测快照（2026-11，工作区 Regions=Global、免费端点训练开）：
-
-| 模型 | 直连 | 走代理 | 计费 |
-|---|---|---|---|
-| `beam-free` | 200 | 200 | cost=0，allowance=0 |
-| `hy4-flash-free` | 200 | 200 | cost=0，allowance=0 |
-| `iceman-contributor-free` | 400 | 400 | 需「允许付费端点基于请求数据训练」 |
-
-> 快照只说明当时的观察，随工作区隐私设置和上游目录变化可能失效，不构成保证。
-
-官方“免费档对外部客户端一律 403”已经不成立，实际取决于工作区隐私设置。
-`iceman` 标价 0，但 API 的 400 明确要求打开的是**付费**训练开关；只开「免费端点训练」仍会 400。
-打开它意味着付费模型请求也可能被用于训练。
-
-`探测免费模型` 按当前路由只测一侧（直连模式测直连；手动测代理；自动按模型是否锁区决定），
-「探测」列直接给结论：`可直连` / `代理可用` / `不可用·具体原因`（Key无效、需开Global、
-地区受限、需开付费/免费训练、锁区需代理、限流等）；要求训练授权的模型，可用结论会追加 `·需训练`。
-`导入列表至WB` 只导入实际路由 200 的模型。
+窗口的 `×` 会收起到系统托盘，单击托盘图标即可恢复。选择「退出并停止转发桥」可同时关闭面板和转发桥。
 
 ## 上游代理
 
-这里说的是 Clash / v2rayN 这类网络代理，和本机的「转发桥」不是一回事。三种模式：
+**`8787` 是 WorkBuddy 连入 OCSub2WB 的端口。** 上游代理地址用于 OCSub2WB 访问 OpenCode Go，例如 `http://127.0.0.1:7897`，这里应填写本机代理实际提供的地址。一键配置给 WorkBuddy 写入的是 `http://127.0.0.1:8787/v1`。
 
-> 注意：当代理软件处于 TUN 模式时，即使这里选「直连」，请求仍可能被上游代理接管。
+| 模式 | 模型请求如何发出 |
+| --- | --- |
+| **直连** | 由转发桥直接访问 OpenCode Go。 |
+| **自动** | 仅目录标记为锁区的模型走已配置的代理，其余模型直连。 |
+| **手动** | 所有模型请求都走已配置的代理。 |
 
-| 模式 | 行为 |
-|---|---|
-| 直连 | 所有模型请求直连 |
-| 手动 | **所有**模型请求走地址框代理 |
-| 自动 | **仅锁区模型**（目录 `go.limited_regions=true`）走地址框代理，其余直连 |
+地址格式为 `http://IPv4:端口`。切换「直连」或「自动」会尝试应用当前设置，修改地址后可点「应用」。面板会先验证连接，再保存到 `.env`。在「自动」模式下，锁区模型缺少可用代理时，转发桥会返回 `502 ProxyRequired`。
 
-- 点「直连」/「自动」立即生效；点「手动」改完地址再点「应用」。自动模式不再扫描本机端口。
-- 地址框只在直连模式置灰；格式固定 `http://IPv4:端口`，只能用数字、点、冒号、斜杠和 `http://`
-  这些字符，域名/账号密码/空格会被拒。
-- 应用时先验证：有桥走 CONNECT（3 秒），无桥走 TCP（2 秒）；失败在地址框内标红并弹出提示，
-  不保存。自动模式下锁区模型没有可用代理会直接返回 502 中文错误，不静默直连。
-- 转发桥没启动时也可以改：直接写 `.env` 的 `OPENCODE_UPSTREAM_PROXY`（off/auto/manual）与
-  `OPENCODE_UPSTREAM_PROXY_URL`，提示「已保存，启动转发桥后生效」。
+系统级 TUN 仍可接管直连流量。转发桥自己的模式由面板或 `.env` 决定。
 
-旧 `.env` 的 `OPENCODE_UPSTREAM_PROXY=auto` 无 URL 时默认用 `http://127.0.0.1:7897`；
-旧值直接是 URL 时自动迁移为手动模式。进程环境里的 `HTTP_PROXY`/`HTTPS_PROXY`
-**不参与**判断（那是 Agent 沙箱注入的）。
+## 常见问题
 
-## models.json 损坏与恢复
+| 现象 | 怎么处理 |
+| --- | --- |
+| 转发桥未运行或 `Connection refused` | 在 OCSub2WB 点「启动转发桥」，确认状态显示运行中。 |
+| `400 MissingSessionID` | 检查该模型是否经转发桥发送。在面板重新运行「一键配置」可恢复默认接口地址。 |
+| `403 EntitlementError` | 检查 Key 是否属于有有效 OpenCode Go 订阅的工作区。 |
+| `403 region` 或 `502 ProxyRequired` | 检查 OpenCode Console 的工作区隐私与区域设置，以及面板的上游代理模式和地址。 |
+| 免费模型提示 `opt-in` | 上游要求该工作区启用相应训练选项。[配置与开发](#配置与开发)中的免费模型快照记录了当时的表现。 |
+| 额度显示读取失败 | 点「刷新额度」。上游短暂失败时，面板会保留最近一次可用结果并标记异常。 |
+| `models_state=recovered` 或写入返回 `409` | 在面板确认从备份恢复，再重新运行「一键配置」。 |
+| 任务报 `job error` | 若转发桥刚重启，旧任务记录已失效，重新执行该操作即可。 |
+| 安装或升级 WorkBuddy 后转发桥启动失败 | 检查便携目录里的两个 `.py` 文件，以及 WorkBuddy 自带的 `pythonw.exe` 是否仍可找到。 |
 
-- 读取到非法 JSON/非数组时，面板/接口只读回退 `cache/backup/models.json.bak.*` 里最新合法备份。
-- 回退状态写入 `/api/status` 的 `models_state=recovered`；写操作会被拒绝并返回 409，
-  不会拿旧备份覆盖损坏文件。
-- 面板首次检测到 recovered 会确认是否写回；确认后调用 `POST /api/models/restore`。
-- 恢复时当前损坏文件复制为 `models.json.corrupt.<时间>`，再用临时文件原子替换；
-  失败时原文件仍在。
-- `cache/backup` 只保留最近 20 份；进程内用 RLock 保护读改写，不是跨进程文件锁。
-- `/api/key` 在 models.json 损坏且无有效备份时返回文本 409/500，不会断连。
+需要看转发详情时，从面板打开缓存目录，查看 `cache\logs\proxy-YYYYMMDD.log` 中的路由、状态码和耗时。
 
-## 控制接口
+## 配置与开发
 
-面板通过 `127.0.0.1:8787/api/*` 操作，行文本协议，全部要求 `X-OCGO-Token`，
-并拒绝带 `Origin` 的请求。令牌每次启动重新生成，写在 `cache\api.token`。
+<details>
+<summary><strong>模型命名、能力字段与免费模型</strong></summary>
 
-```
-GET  /api/status            S: ver/proxy_ver/pid/port/mode/proxy_url/upstream/
-                            key/models/models_state/requests/uptime
-GET  /api/quota[?refresh=1] Q/R: 三档额度
-GET  /api/models            M: 目录 + free/imported/思考形态/规则
-POST /api/refresh?reset=1   R: 一键配置（body: free=all 或 id1,id2）
-                            R 含 conflicts=N ids=...
-POST /api/workbuddy/purge   P: 清空WB列表托管条目
-POST /api/models/restore    M: 从最新备份恢复 models.json
-POST /api/selftest          J(202): 单模型自检（body: model=<id>）
-POST /api/probe             J(202): 免费模型探测
-GET  /api/job/<id>          J/T/F: 轮询任务；仅保留最近 20 个终态
-POST /api/key               K: body: key=oc_sk_...
-POST /api/upstream-proxy    U: body: mode=off|auto|manual + url=...
-GET  /api/log?lines=200     T: 日志尾巴；lines 10-2000，非法返回 400
-POST /api/shutdown          S: 先回 200，再异步退出
+显示名使用上游目录的完整 `name`，网关 `id` 原样写入。付费前缀是 `[OC] `，免费前缀由它派生为 `[OC-FREE] `。同名前缀下出现重复显示名时，末尾会追加 `（<id>）`。
+
+| WorkBuddy 中的名称示例 | 模型 ID |
+| --- | --- |
+| `[OC] DeepSeek V4.1 Flash 1017` | `deepseek-v4.1-flash` |
+| `[OC] GLM-5.3` | `glm-5.3` |
+| `[OC-FREE] Beam Free` | `beam-free` |
+| `[OC-FREE] Hy4 flash Free` | `hy4-flash-free` |
+
+如需更改前缀，可在 `.env` 中配置。引号内的末尾空格会保留。
+
+```dotenv
+OPENCODE_NAME_PREFIX="[OC] "
 ```
 
-`/v1/models` 有 10 分钟缓存：WorkBuddy 每 10 分钟用它巡检自定义模型，
-缓存后不再打网关（日志里标记 `cached`）。
+| 能力 | 字段来源 |
+| --- | --- |
+| 上下文 / 最大输出 | `limit.context` / `limit.output`。目录缺失时面板显示 `—`，模型条目省略该字段。 |
+| 免费 / 付费 | 检查 `cost.text` 的输入、输出和缓存读取价格。已知正价判为付费。价格不足以判断时检查 `-free` 后缀。 |
+| 图片 / 工具调用 | `modalities.input` 中的 `image/*` / `capabilities.tools.supported`。 |
+| 思考 | `capabilities.reasoning`。允许切换时写 `canDisableThinking: true`。明确强制思考时写 `canDisableThinking: false` 和 `onlyReasoning: true`。有档位但目录未声明能否切换时，省略这两个开关字段。 |
 
-## 构建面板
+默认思考档位是 WorkBuddy 支持的最高档。`budget` 是 token 上限，面板的 `on-off` 和 `Fixed` 是显示标签。自检会按目录选择 `none`、省略 `reasoning_effort` 或使用支持的最低档。模型能否真正停止思考取决于上游。
 
-### 本地构建
+**免费模型历史快照（2026-11）。** 当时工作区使用 Regions=Global 并开启了免费端点训练。
+
+| 模型 | 直连 | 走代理 | 当时的结果 |
+| --- | --- | --- | --- |
+| `beam-free` | 200 | 200 | `cost=0`，`allowance=0` |
+| `hy4-flash-free` | 200 | 200 | `cost=0`，`allowance=0` |
+| `iceman-contributor-free` | 400 | 400 | 上游要求开启付费端点训练 |
+
+结果随模型目录和工作区隐私设置变化。开启付费端点训练可能使付费模型的请求也被用于训练。
+
+</details>
+
+<details>
+<summary><strong>配置文件、备份与恢复</strong></summary>
+
+| 位置 | 用途 |
+| --- | --- |
+| 便携目录的 `.env` | OpenCode API Key、上游代理模式和地址、模型名前缀。参考 [`.env.example`](./.env.example)。 |
+| `%USERPROFILE%\.workbuddy\models.json` | WorkBuddy 自定义模型。面板保存新 Key 时会校验 Key，并同步更新托管条目。 |
+| 便携目录的 `cache\` | 日志、模型配置备份、面板控制令牌和转发桥 PID。 |
+
+Key 保存在本机的 `.env` 和托管模型条目中，均为明文。`.env` 和 `cache/` 已列入 Git 忽略清单。启动转发桥后才可通过面板保存新 Key。
+
+清空和重建时，`vendor=OpenCode` 或 URL 指向本机 `8787` 的条目会被识别为托管模型。改写前会备份原文件，再通过临时文件替换。`cache/backup/` 保留最近 20 份备份。读改写使用进程内锁。
+
+如果 `models.json` 损坏，转发桥会尝试从最近的合法备份只读加载，并暂停相关写入。确认恢复时会先保留损坏的原件为 `models.json.corrupt.<时间>`，再替换配置文件。
+
+旧版 `.env` 只记录 `OPENCODE_UPSTREAM_PROXY=auto` 时，兼容地址为 `http://127.0.0.1:7897`。旧值直接记录 URL 时按手动模式读取。面板保存时使用 `OPENCODE_UPSTREAM_PROXY` 和 `OPENCODE_UPSTREAM_PROXY_URL`。
+
+</details>
+
+<details>
+<summary><strong>转发原理与控制接口</strong></summary>
+
+WorkBuddy 的自定义模型通过本机转发桥访问 `opencode.ai/inference/go`。转发桥为请求补齐 `x-opencode-session`，统一 `User-Agent`，再按请求路径转给 OpenAI Chat Completions、Anthropic Messages 或 Responses 接口。WorkBuddy 的自定义模型配置使用 `POST /v1/chat/completions`。排查 `403 Cloudflare 1010` 时，可检查转发请求是否出现重复的 `User-Agent`。
+
+```text
+WorkBuddy ──► 127.0.0.1:8787 ──► OpenCode Go
+                OCSub2WB
+```
+
+面板和自动写入的模型地址都使用 `8787`。Python 脚本的 `--port` 参数可以改监听端口，面板连接地址和一键配置写入的 URL 仍使用 `8787`。
+
+控制接口使用行文本协议。`/api/*` 要求 `X-OCGO-Token` 并拒绝带 `Origin` 的请求。令牌在启动时生成，保存在 `cache\api.token`。
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/status` | 读取版本、PID、监听端口、代理模式、模型及恢复状态。 |
+| `GET /api/quota?refresh=1` | 强制刷新三档额度。面板的独立额度查询也可在停桥时运行。 |
+| `GET /api/models` | 读取模型目录、能力、规则和导入标记。 |
+| `POST /api/refresh?reset=1` | 重建托管模型。`free=all` 或 `free=id1,id2` 指定免费模型，结果包含 ID 冲突信息。 |
+| `POST /api/workbuddy/purge` | 清空托管模型。 |
+| `POST /api/models/restore` | 从最近的合法备份恢复模型配置。 |
+| `POST /api/selftest` | 启动单模型自检，参数为 `model=<id>`。 |
+| `POST /api/probe` | 启动免费模型探测。 |
+| `GET /api/job/<id>` | 查询自检或探测任务，最近保留 20 个终态。 |
+| `POST /api/key` | 校验并保存 Key，参数为 `key=oc_sk_…`。 |
+| `POST /api/upstream-proxy` | 设置出站方式，传入 `mode`（`off`、`auto` 或 `manual`）及 `url`。 |
+| `GET /api/log?lines=200` | 读取日志尾部。行数限定在 10–2000，无法解析为整数时返回 `400`。 |
+| `POST /api/shutdown` | 先返回 `200`，随后异步停止转发桥。 |
+
+WorkBuddy 访问的 `/v1/models` 使用 10 分钟响应缓存，命中时可在日志中看到 `cached`。
+
+</details>
+
+<details>
+<summary><strong>本地构建与发布</strong></summary>
+
+需要 MinGW-w64（GCC 16.2 或兼容版本）和可从命令行调用的 Python。构建脚本依次查找 `MINGW` 指定的工具目录、`PATH` 和 `D:\dev\mingw64\bin`。请先退出正在运行的面板，释放 EXE 文件。
 
 ```bat
 cd panel
 build.bat
 ```
 
-脚本优先使用 `MINGW` 环境变量或 PATH 里的 `g++`/`windres`，都没有时回退
-`D:\dev\mingw64\bin`。依赖 MinGW-w64（GCC 16.2 或兼容版本）。步骤：
+脚本先用 `windres` 编译资源，再用 `g++` 生成 `..\OCSub2WB.exe`，最后执行 [`patch_manifest.py`](https://github.com/869Nitro/OCSub2WB/blob/main/panel/patch_manifest.py) 替换 Windows 清单。窗口类、互斥体与清单中的历史名称用于兼容现有资源。CI 使用 `build.bat --ci`。
 
-1. `windres app.rc` 生成 `app_res.o`（图标资源 ID 1）。
-2. g++ 编译 `ocgo_panel.cpp` + `app_res.o`，输出 `..\OCSub2WB.exe`。
-3. `patch_manifest.py` 通过 `UpdateResourceW` 替换资源 24/1。
+[发布工作流](https://github.com/869Nitro/OCSub2WB/blob/main/.github/workflows/build-release.yml) 在 Windows 上构建 EXE、检查 Python 语法和运行库依赖，并生成便携 ZIP 与 SHA-256 校验文件。手动触发时产物上传到 Actions，发布 GitHub Release 后校验文件和 ZIP 会作为发行资产上传。上传依赖工作流的 `contents: write` 权限。
 
-mingw 的 specs 会强制注入默认清单，所以不能直接用 windres 写 manifest，否则会报
-"multiple non-default manifests"。构建前先退出正在运行的 `OCSub2WB.exe`，否则 exe 被占用。
-CI 使用 `build.bat --ci`，失败时不会 `pause`。
+| 源码 | 用途 |
+| --- | --- |
+| [`opencode-go-proxy.py`](./opencode-go-proxy.py) | 本机转发和控制接口。 |
+| [`ocgo_common.py`](./ocgo_common.py) | Key、模型配置、上游目录、额度与自检。 |
+| [`panel/`](https://github.com/869Nitro/OCSub2WB/tree/main/panel) | Windows 面板源码、图标、清单和构建脚本。 |
 
-### 云端构建与 Release
-
-仓库的 `.github/workflows/build-release.yml` 会在 `windows-latest` 上：
-
-1. 安装 MSYS2 MinGW 和 Python；
-2. 运行 `panel\build.bat --ci`；
-3. 校验 exe、Py 语法和静态依赖；
-4. 把 `OCSub2WB.exe`、两个 `.py`、README、`.env.example` 打进
-   `OCSub2WB-<tag>-win64.zip`，并生成 SHA256；
-5. 手动运行时上传 Actions artifact；发布 Release 时把 ZIP 和哈希挂到 Release。
-
-发布新版本：GitHub 仓库 → `Releases` → `Draft a new release` → 新建 tag
-`v2.0.0`（目标 `main`）→ 写标题/说明 → `Publish release`。
-workflow 跑完后，Release 资产会出现 ZIP 和 `.sha256`。
-首次使用前，在 `Settings → Actions → General → Workflow permissions` 选择
-`Read and write permissions`，否则上传 Release 资产会 403。
-
-## 排错
-
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| 面板 `○ 转发桥未运行` | 转发桥没起 | 点「启动转发桥」 |
-| `Connection refused` | 同上 | 同上 |
-| `400 MissingSessionID` | 直连了网关 | 接口地址必须是 `http://127.0.0.1:8787/v1` |
-| `403 Cloudflare 1010` | 重复请求头被判伪造指纹 | 头名统一小写后再覆盖，别改回去 |
-| `403 EntitlementError` | 无有效订阅 / Key 不属于该工作区 | 面板里换 Key |
-| 免费模型 400 `opt-in` | 需要付费训练开关 | 见上文，自行权衡 |
-| `403 region` | DeepSeek / LongCat 需 Regions=Global | Console → 隐私 → 全球 |
-| 额度显示 `读取失败` | 上游瞬时失败 | 点「刷新额度」，已内置一次重试 |
-| `models_state=recovered` / 409 | models.json 损坏，已回退备份 | 面板确认恢复，或 `POST /api/models/restore` |
-| 面板操作报 `job error` | 转发桥重启过，旧 job 失效 | 面板会自动丢弃，重新操作即可 |
-| 面板起不来 | Python 或权限问题 | 手动 `python opencode-go-proxy.py` 看报错 |
-
-日志：`cache\logs\proxy-YYYYMMDD.log`，一行一请求，含状态码、字节、耗时、会话 ID。
-
-## 限制
-
-- 转发桥没起时该模型报连接失败，其它内置模型不受影响。
-- **必须安装 WorkBuddy（Windows x64）**；本桥复用 WorkBuddy 自带的 `pythonw`，不另装 Python。
-  当前验证版本 `WorkBuddy-win32-x64-user-5.11.3.43806934-ecace0f7`，其它版本未逐一验证。
-- 转发桥不存 Key、不写 Key 到日志；`.env` 与 models.json 里是明文（本机自用）。
-- C 盘重启还原后 models.json 会丢，打开面板点「一键配置」即可；`D:\dev` 与 `.env` 不受影响。
-- 不注册服务、不写全局环境变量、不开机自启。
-- 思考强度按模型各自的能力表下发；WorkBuddy 里关掉思考只是不发 `reasoning_effort`，
-  对“默认必思考”的模型不等于真停止；上游缺 toggle 时按未知处理，不保证能硬关。
-- 自检只覆盖“这一个模型能不能用”，不验证路径容错/重复实例等系统项。
-- 额度读取与「清空WB列表」不依赖转发桥；**保存新 Key 仍需要转发桥在跑**。
-- 转发桥未启动时清空由一次性 `pythonw` 进程完成，仍会先备份 models.json，再原子替换。
-- TUN 模式下系统级代理可能接管“直连”请求；面板只能控制本转发桥的出站代理。
-- Windows 单用户环境，`.env`/models.json 是明文，未做 ACL 加固。
-
-## 文件
-
-| 文件 | 作用 |
-|---|---|
-| `OCSub2WB.exe` | Release 便携 ZIP 的入口；不提交进仓库 |
-| `opencode-go-proxy.py` | 转发 + 控制接口；ZIP 必须保留 |
-| `ocgo_common.py` | 唯一写盘者：env、上游代理探测、目录、models.json、额度、探测、自检；ZIP 必须保留 |
-| `panel/` | 面板源码、`app.rc`、图标、`build.bat`、manifest patch |
-| `.github/workflows/build-release.yml` | GitHub Actions 构建与 Release 上传 |
-| `.env` | `OPENCODE_API_KEY`、`OPENCODE_UPSTREAM_PROXY`、`OPENCODE_UPSTREAM_PROXY_URL`、`OPENCODE_NAME_PREFIX`；不入库 |
-| `.env.example` | 首次配置示例；会打进 Release ZIP |
-| `.gitattributes` | 保证 `.bat` 用 CRLF、exe 按二进制处理 |
-| `cache/` | `logs\`、`backup\`、`api.token`、`proxy.pid`；不入库 |
-| `.gitignore` | 忽略 `.env`、`cache/`、exe、dist、构建中间物 |
-| `README.md` | 本文件 |
+</details>
