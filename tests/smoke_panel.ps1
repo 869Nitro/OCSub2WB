@@ -51,19 +51,23 @@ class CatalogReply:
              "cost": {"text": {"input": 0, "output": 0}}},
         ]}).encode("utf-8")
 
-class FixtureHTTPSConnection(http.client.HTTPSConnection):
-    def connect(self):
-        raise OSError("Network disabled in the packaged panel test")
+def fixture_connect(self):
+    raise OSError("Network disabled in the packaged panel test")
 
-    def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
-        if (self.host, method, url) != ("opencode.ai", "GET", "/inference/go/v1/models"):
-            raise OSError("Unexpected request in the packaged panel test")
 
-    def getresponse(self):
-        Path(os.environ["OCSUB2WB_CATALOG_MARKER"]).touch()
-        return CatalogReply()
+def fixture_request(self, method, url, body=None, headers=None, *, encode_chunked=False):
+    if (self.host, method, url) != ("opencode.ai", "GET", "/inference/go/v1/models"):
+        raise OSError("Unexpected request in the packaged panel test")
 
-http.client.HTTPSConnection = FixtureHTTPSConnection
+
+def fixture_response(self):
+    Path(os.environ["OCSUB2WB_CATALOG_MARKER"]).touch()
+    return CatalogReply()
+
+
+http.client.HTTPSConnection.connect = fixture_connect
+http.client.HTTPSConnection.request = fixture_request
+http.client.HTTPSConnection.getresponse = fixture_response
 '@
 [IO.File]::WriteAllText((Join-Path $fixture 'sitecustomize.py'), $testUpstream, [Text.UTF8Encoding]::new($false))
 $catalogMarker = Join-Path $run 'catalog-used'
