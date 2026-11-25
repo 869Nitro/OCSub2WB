@@ -49,7 +49,8 @@ GO_BASE = "/inference/go"
 CATALOG_URL = f"https://{HOST}{GO_BASE}/v1/models"
 USAGE_URL = f"https://{HOST}{GO_BASE}/v1/usage"
 CHAT_URL = f"https://{HOST}{GO_BASE}/openai/v1/chat/completions"
-DEFAULT_BASE_URL = "http://127.0.0.1:8787/v1"
+DEFAULT_PORT = 8787
+DEFAULT_BASE_URL = f"http://127.0.0.1:{DEFAULT_PORT}/v1"
 USER_AGENT = "workbuddy-opencode-proxy/2.0 (+windows; local)"
 VENDOR = "OpenCode"
 FALLBACK_SESSION = "ses_wb_fallback"
@@ -92,6 +93,11 @@ def mask_key(key: str) -> str:
 
 def stable_only(values) -> list[str]:
     return [v for v in dict.fromkeys(values) if v]
+
+
+def local_base_url(port: int = DEFAULT_PORT) -> str:
+    """Base URL WorkBuddy uses to reach a relay listening on ``port``."""
+    return f"http://127.0.0.1:{int(port)}/v1"
 
 
 # --------------------------------------------------------------------------- #
@@ -547,13 +553,58 @@ def restore_models_from_backup(models_path: str = MODELS_PATH) -> dict:
         raise RuntimeError(f"备份文件均不可用: {last_error}")
 
 
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _loopback_v1(url: object) -> tuple[bool, int]:
+    """True + port when ``url`` is exactly this tool's loopback /v1 shape.
+
+    Only the parsed host and path count: a loopback fragment inside an
+    external URL (path, query or userinfo) must not claim the row.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return False, 0
+    try:
+        parts = urllib.parse.urlsplit(text)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return False, 0
+    if (parts.scheme not in ("http", "https") or host not in LOOPBACK_HOSTS
+            or parts.username or parts.password
+            or parts.path.rstrip("/") != "/v1"
+            or parts.query or parts.fragment):
+        return False, 0
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    return True, port
+
+
 def managed_entry(entry: dict) -> bool:
     if not isinstance(entry, dict):
         return False
-    if entry.get("vendor") == VENDOR:
-        return True
-    url = str(entry.get("url") or "")
-    return "127.0.0.1:8787" in url or "localhost:8787" in url
+    own_url, port = _loopback_v1(entry.get("url"))
+    if not own_url:
+        return False
+    # This tool stamps its vendor; keep accepting the initial release's
+    # URL-only rows on the default port for a seamless upgrade.
+    return entry.get("vendor") == VENDOR or port == DEFAULT_PORT
+
+
+def _reserve_backup_path() -> str:
+    """Reserve a unique backup name; seconds alone collide on quick writes."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = os.path.join(BACKUP_DIR, f"models.json.bak.{stamp}")
+    for index in range(1000):
+        candidate = base if index == 0 else f"{base}-{index}"
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    raise OSError(f"cannot allocate a models.json backup name under {BACKUP_DIR}")
 
 
 def save_models(entries: list, path: str = MODELS_PATH, backup: bool = True) -> str | None:
@@ -566,13 +617,17 @@ def save_models(entries: list, path: str = MODELS_PATH, backup: bool = True) -> 
     backup_path = None
     if backup and os.path.exists(path):
         ensure_cache_dir()
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_path = os.path.join(BACKUP_DIR, f"models.json.bak.{stamp}")
+        backup_path = _reserve_backup_path()
         try:
             shutil.copy2(path, backup_path)
-            _prune_models_backups()
         except OSError:
-            backup_path = None
+            # The backup is the only rollback copy; never risk the original.
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
+            raise
+        _prune_models_backups()
 
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:

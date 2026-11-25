@@ -845,7 +845,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             free = form.get("free") or query.get("free", ["none"])[0] or "none"
             try:
                 stats = oc.sync_models(
-                    Config.fallback_key, reset=reset, include_free=free,
+                    Config.fallback_key, base_url=oc.local_base_url(Config.port),
+                    reset=reset, include_free=free,
                     proxy=None, force=False,
                 )
             except oc.ModelsRecoveryRequired as exc:
