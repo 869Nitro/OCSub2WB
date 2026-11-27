@@ -7,7 +7,9 @@
 
 ## 快速开始
 
-准备 Windows x64、已安装并登录的 WorkBuddy，以及自己的 OpenCode Go API Key。面板可以使用 WorkBuddy 自带的 Python，项目已用 WorkBuddy 5.11.3 验证转发。[OpenCode Go 订阅与 Key](https://opencode.ai/docs/console/go/#how-it-works)
+准备 Windows x64、已安装并登录的 WorkBuddy，以及自己的 OpenCode Go API Key。面板可以使用 WorkBuddy 自带的 Python。[OpenCode Go 订阅与 Key](https://opencode.ai/docs/console/go/#how-it-works)
+
+已在 WorkBuddy 5.11.3 上实测 OpenCode Go 转发。Go Plus 和 Go Teams 的兼容性依据上游共用的推理和用量接口判断，尚未用这两个套餐的 Key 实测。使用 Go Teams 时，请填在团队工作区创建的成员个人 API Key。[OpenCode 用量接口](https://opencode.ai/docs/console/go/#usage)
 
 1. 在 GitHub 发布页的 **Assets** 中下载 `OCSub2WB-v2.2.0-win64.zip`，完整解压到可写目录。[v2.2.0 发布页](https://github.com/869Nitro/OCSub2WB/releases/tag/v2.2.0)
 2. 打开 WorkBuddy，再运行 `OCSub2WB.exe`。让 EXE 和包内的两个 `.py` 文件保持在同一目录。
@@ -37,13 +39,11 @@
 
 ### 为什么对话中会出现 DeepSeek Flash 的高速记录？
 
-**WorkBuddy 5.11.3 的工具结果审查设置只有开关。** 在这台机器的四组测试中，主对话分别使用 WorkBuddy 官方的 Hy4 Flash、DeepSeek Flash，以及经 OCSub2WB 转发的这两款模型。四组测试都观察到 DeepSeek Flash 的请求出现在转发历史里。
+WorkBuddy 5.11.3 的工具结果审查通过开关控制。在本机四组实测中，主对话分别选用 WorkBuddy 官方的 Hy4 Flash、DeepSeek Flash，以及经 OCSub2WB 接入的这两款模型。四组都观察到 DeepSeek Flash 请求经过转发桥。
 
-截图拍摄于主对话使用 WorkBuddy 官方 DeepSeek Flash 期间。本机日志显示，图中的三条转发请求被 WorkBuddy 标记为 `content_security_reviewer`，发送到了已配置的 OCSub2WB 端点。这里记录的是本次实际发生的路由。换一套模型目录或模型 ID 后，审查请求的去向需要重新验证。
+截图拍摄时，主对话使用 WorkBuddy 官方 DeepSeek Flash。本机日志将图中三条经 OCSub2WB 转发的请求标记为 `content_security_reviewer`。这个路由结论限于本次验证的版本和模型配置。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
 
-本机四种对话配置均观察到这一现象：WorkBuddy 官方 Hy4 Flash、官方 DeepSeek Flash、经 OCSub2WB 转发的 DeepSeek Flash，以及经 OCSub2WB 转发的 Hy4 Flash。这是跨模型、跨对话端点复现的行为。具体是否触发审查、选到哪个端点，取决于这一轮的工具调用和 WorkBuddy 当时的模型配置。主对话和审查都用 DeepSeek Flash 时，可以在 WorkBuddy 日志中用 `chat` 和 `content_security_reviewer` 区分。
-
-上图是使用 WorkBuddy 官方 DeepSeek Flash 对话期间的实机案例。日志中经过转发桥的三条记录属于工具结果审查，其中两条的接收速率为 **10,936.9** 和 **22,162.0 tok/s**。这类审查的回复很短，流式分块集中到达时，按首末输出到达间隔估算出的 **接收 tok/s** 会很高。这个读数衡量的是响应到达转发桥的速率，模型内部的生成速度需要上游提供相应计时。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
+图中的 **10,936.9** 和 **22,162.0 tok/s** 是流式分块在很短的时间内集中到达时的接收速率。这个指标按分块到达转发桥的时间计算。
 
 ## 接下来怎么用
 
@@ -56,6 +56,11 @@
 | 查找失败原因 | 点 **打开日志目录**，也可以先看[常见问题](https://github.com/869Nitro/OCSub2WB/blob/main/docs/usage.md#常见问题)。 |
 
 升级、上游代理、备份恢复、配置文件和源码构建的详细步骤见[使用手册](https://github.com/869Nitro/OCSub2WB/blob/main/docs/usage.md)。
+
+## 贡献者
+
+- [869Nitro](https://github.com/869Nitro) 发起并维护项目，负责需求设计、实机测试与发布。
+- **OpenAI Codex**（AI 编程助手）负责代码实现与自动化测试，协助排查问题和编写文档。
 
 ## 许可
 
