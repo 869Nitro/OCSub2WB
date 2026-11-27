@@ -21,10 +21,10 @@
 ## 运行界面
 
 <p align="center">
-  <img src="./assets/panel.png" width="980" alt="OCSub2WB 实机截图，最近转发请求表显示 Tok/s、Δt 和 TTFT，下方显示模型探测结果">
+  <img src="./assets/panel.png" width="980" alt="OCSub2WB v2.2.1 实机截图，最近转发请求表显示 Tok/s、Δt 和 TTFT，下方显示模型探测结果">
 </p>
 
-这是 **v2.2.1 发布前的实机截图**，标题栏仍显示测试时的 v2.2.0。右上角已显示新加的 Δt 列。图中的 DeepSeek Flash 记录为 **2,024.3 Tok/s**，首尾输出的接收间隔为 **4.4 ms**。
+这是 **OCSub2WB v2.2.1** 的实机截图。右上角显示最近三条转发请求的 Tok/s、Δt 和 TTFT。图中第一条 DeepSeek Flash 请求的接收速率为 **1,325.0 Tok/s**，首尾输出的接收间隔为 **6.8 ms**。
 
 ## 最近完成的转发请求
 
