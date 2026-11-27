@@ -37,7 +37,9 @@
 
 ### 为什么对话中会出现 DeepSeek Flash 的高速记录？
 
-这是 **WorkBuddy 5.11.3 的工具结果审查行为**。WorkBuddy 可以为审查单独选择模型。如果选中已配置的自定义 `deepseek-v4.1-flash`，审查就会使用它的端点，经过 OCSub2WB 时会出现在转发历史里。即使对话使用 WorkBuddy 官方模型，审查请求也可能经过转发桥。
+**WorkBuddy 5.11.3 的工具结果审查设置只有开关。** 在这台机器的四组测试中，主对话分别使用 WorkBuddy 官方的 Hy4 Flash、DeepSeek Flash，以及经 OCSub2WB 转发的这两款模型。四组测试都观察到 DeepSeek Flash 的请求出现在转发历史里。
+
+截图拍摄于主对话使用 WorkBuddy 官方 DeepSeek Flash 期间。本机日志显示，图中的三条转发请求被 WorkBuddy 标记为 `content_security_reviewer`，发送到了已配置的 OCSub2WB 端点。这里记录的是本次实际发生的路由。换一套模型目录或模型 ID 后，审查请求的去向需要重新验证。
 
 本机四种对话配置均观察到这一现象：WorkBuddy 官方 Hy4 Flash、官方 DeepSeek Flash、经 OCSub2WB 转发的 DeepSeek Flash，以及经 OCSub2WB 转发的 Hy4 Flash。这是跨模型、跨对话端点复现的行为。具体是否触发审查、选到哪个端点，取决于这一轮的工具调用和 WorkBuddy 当时的模型配置。主对话和审查都用 DeepSeek Flash 时，可以在 WorkBuddy 日志中用 `chat` 和 `content_security_reviewer` 区分。
 
