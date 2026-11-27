@@ -21,10 +21,10 @@
 ## 运行界面
 
 <p align="center">
-  <img src="./assets/panel.png" width="980" alt="OCSub2WB v2.2.0 实机截图，最近转发请求显示 DeepSeek Flash 的五位数接收速率">
+  <img src="./assets/panel.png" width="980" alt="OCSub2WB 实机截图，最近转发请求表显示 Tok/s、Δt 和 TTFT，下方显示模型探测结果">
 </p>
 
-这是 **OCSub2WB v2.2.0** 的实机截图，右上角显示近期转发请求的接收速率和 TTFT。图中的五位数读数见下文的工具结果审查案例。v2.2.1 在 Tok/s 旁新增 Δt 列。
+这是 **v2.2.1 发布前的实机截图**，标题栏仍显示测试时的 v2.2.0。右上角已显示新加的 Δt 列。图中的 DeepSeek Flash 记录为 **2,024.3 Tok/s**，首尾输出的接收间隔为 **4.4 ms**。
 
 ## 最近完成的转发请求
 
@@ -42,9 +42,9 @@
 
 WorkBuddy 5.11.3 的工具结果审查通过开关控制。在本机四组实测中，主对话分别选用 WorkBuddy 官方的 Hy4 Flash、DeepSeek Flash，以及经 OCSub2WB 接入的这两款模型。四组都观察到 DeepSeek Flash 请求经过转发桥。
 
-截图拍摄时，主对话使用 WorkBuddy 官方 DeepSeek Flash。本机日志将图中三条经 OCSub2WB 转发的请求标记为 `content_security_reviewer`。这个路由结论限于本次验证的版本和模型配置。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
+此前一次以 WorkBuddy 官方 DeepSeek Flash 为主对话模型的测试中，本机日志将三条经 OCSub2WB 转发的请求标记为 `content_security_reviewer`。这个路由结论限于本次验证的版本和模型配置。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
 
-图中的 **10,936.9** 和 **22,162.0 tok/s** 是流式分块在很短的时间内集中到达时的接收速率。这个指标按分块到达转发桥的时间计算。
+此前测试中记录的 **10,936.9** 和 **22,162.0 tok/s** 是流式分块在很短的时间内集中到达时的接收速率。这个指标按分块到达转发桥的时间计算。
 
 ## 接下来怎么用
 
