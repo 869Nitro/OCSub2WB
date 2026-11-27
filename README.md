@@ -66,7 +66,7 @@ WorkBuddy 的「工具内容注入防护」会检查工具返回的内容。启�
 
 ## 如果 WorkBuddy 官方支持会话标识，还需要 OCSub2WB 吗？
 
-如果将来 WorkBuddy 的自定义模型请求能提供 OpenCode Go 认可的稳定会话标识，而且你用自己的 API Key 和接口地址实测直连成功，只用一两个常用模型时，可以优先在 WorkBuddy 的自定义模型设置里直连 OpenCode Go。 [OpenCode 直连接入说明](https://opencode.ai/docs/console/harnesses)
+如果将来 WorkBuddy 的自定义模型请求能提供 OpenCode Go 认可的稳定会话标识，而且你用自己的 API Key 和接口地址实测直连成功，只用一两个常用模型时，建议优先在 WorkBuddy 的自定义模型设置中配置 OpenCode Go 上游，而不是继续依赖此本机转发桥。 [OpenCode 直连接入说明](https://opencode.ai/docs/console/harnesses)
 
 如果你经常导入或更换一批模型，想探测免费模型、集中看订阅用量和近期请求，或者需要给 OpenCode Go 单独设代理，仍可使用 OCSub2WB。当前的「一键配置」会把托管模型指向本机转发桥，近期请求表也只记录经过它的请求。
 
