@@ -33,7 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 # Runtime artefacts belong to the project, not to a machine-wide cache folder:
@@ -959,7 +959,7 @@ def selftest_reasoning(caps: dict | None) -> tuple[dict, str]:
 def _selftest_local(port: int, method: str, path: str, body: dict | None,
                     key: str, timeout: float) -> tuple[int, dict, bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    headers = {"Accept": "application/json", "Connection": "close"}
+    headers = {"Accept": "application/json", "Connection": "close", "X-OCGO-Selftest": "1"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
     payload = None
@@ -1062,7 +1062,7 @@ def selftest_model(key: str, model: str, port: int = 8787,
             body["stream"] = True
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30.0)
             headers = {"Accept": "text/event-stream", "Content-Type": "application/json",
-                       "Connection": "close"}
+                       "Connection": "close", "X-OCGO-Selftest": "1"}
             if key:
                 headers["Authorization"] = f"Bearer {key}"
             conn.request("POST", "/v1/chat/completions",

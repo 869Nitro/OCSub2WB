@@ -25,6 +25,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -60,6 +61,7 @@ enum {
     IDC_Q_BAR1 = 1014, IDC_Q_BAR2, IDC_Q_BAR3,
     IDC_Q_INFO1 = 1017, IDC_Q_INFO2, IDC_Q_INFO3,
     IDC_Q_REFRESH = 1020,
+    IDC_RECENT_REQUESTS = 1052,
 
     IDC_MODELS = 1021,
     IDC_BTN_REFRESH = 1022,
@@ -84,6 +86,7 @@ enum {
 
 static const int CLIENT_W = 1080;
 static const int CLIENT_H = 748;
+static const DWORD PANEL_STYLE = WS_OVERLAPPEDWINDOW;
 
 static const int WM_APP_HTTP = WM_APP + 1;
 static const int WM_APP_EXIT_NOW = WM_APP + 2;
@@ -91,6 +94,7 @@ static const int WM_APP_JOB_DONE = WM_APP + 3;
 static const int WM_APP_PROXY_CHECK = WM_APP + 4;
 static const int WM_APP_TRAY = WM_APP + 5;
 static const int WM_APP_SHOW = WM_APP + 6;
+static const int WM_APP_FIT_WINDOW = WM_APP + 7;
 
 enum HttpKind {
     K_STATUS = 1,
@@ -110,7 +114,6 @@ enum HttpKind {
 
 static HWND g_hwnd = nullptr;
 static HFONT g_font = nullptr;
-static HFONT g_font_bold = nullptr;
 static std::wstring g_exe_dir;
 static std::string g_token;
 static std::mutex g_token_mutex;
@@ -935,12 +938,50 @@ static void StartEngine() {
 // UI helpers
 // --------------------------------------------------------------------------- //
 
+enum ResizeAnchor : unsigned {
+    MoveRight = 1 << 0,
+    GrowWidth = 1 << 1,
+    MoveBelowModels = 1 << 2,
+    GrowModelHeight = 1 << 3,
+    GrowLogHeight = 1 << 4
+};
+
+struct ResizableControl {
+    HWND hwnd;
+    int x, y, width, height;
+    unsigned anchors;
+};
+
+static std::vector<ResizableControl> g_resizable_controls;
+
 static HWND Mk(const wchar_t* cls, const wchar_t* text, DWORD style,
-               int x, int y, int w, int h, int id, DWORD ex = 0) {
+               int x, int y, int w, int h, int id, unsigned anchors = 0, DWORD ex = 0) {
     HWND child = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style,
                                  x, y, w, h, g_hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
     if (child && g_font) SendMessageW(child, WM_SETFONT, (WPARAM)g_font, TRUE);
+    if (child && anchors) g_resizable_controls.push_back({child, x, y, w, h, anchors});
     return child;
+}
+
+static void ResizeControls(int width, int height) {
+    const int extra_width = std::max(0, width - CLIENT_W);
+    const int extra_height = std::max(0, height - CLIENT_H);
+    const int extra_models = extra_height / 2;
+    const int extra_log = extra_height - extra_models;
+
+    HDWP batch = BeginDeferWindowPos(static_cast<int>(g_resizable_controls.size()));
+    for (const auto& control : g_resizable_controls) {
+        if (!batch) return;
+        const unsigned anchors = control.anchors;
+        const int x = control.x + ((anchors & MoveRight) ? extra_width : 0);
+        const int y = control.y + ((anchors & MoveBelowModels) ? extra_models : 0);
+        const int w = control.width + ((anchors & GrowWidth) ? extra_width : 0);
+        const int h = control.height + ((anchors & GrowModelHeight) ? extra_models : 0)
+                                      + ((anchors & GrowLogHeight) ? extra_log : 0);
+        batch = DeferWindowPos(batch, control.hwnd, nullptr, x, y, w, h,
+                               SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (batch) EndDeferWindowPos(batch);
 }
 
 static void SetText(int id, const std::wstring& text) {
@@ -993,27 +1034,48 @@ static LRESULT CALLBACK ProxyEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-static void Layout() {
-    Mk(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, 12, 10, 600, 22, IDC_STATUS);
+static constexpr const wchar_t* RECENT_REQUEST_COLUMNS[] = {L"模型 ID", L"tok/s", L"TTFT (s)"};
+using RecentRequestRow = std::array<std::wstring, 3>;
+static std::vector<RecentRequestRow> g_recent_requests;
+static void ResizeRecentRequestColumns();
 
-    Mk(L"BUTTON", L"启动转发桥", BS_PUSHBUTTON, 620, 8, 120, 28, IDC_BTN_START);
-    Mk(L"BUTTON", L"打开日志目录", BS_PUSHBUTTON, 748, 8, 120, 28, IDC_BTN_DIR);
-    Mk(L"BUTTON", L"退出", BS_PUSHBUTTON, 964, 8, 92, 28, IDC_BTN_EXIT);
+static void CreateControls() {
+    Mk(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, 12, 10, 600, 22, IDC_STATUS, GrowWidth);
 
-    Mk(L"BUTTON", L"额度", BS_GROUPBOX, 12, 42, 1056, 126, -1);
+    Mk(L"BUTTON", L"启动转发桥", BS_PUSHBUTTON, 620, 8, 120, 28, IDC_BTN_START, MoveRight);
+    Mk(L"BUTTON", L"打开日志目录", BS_PUSHBUTTON, 748, 8, 120, 28, IDC_BTN_DIR, MoveRight);
+    Mk(L"BUTTON", L"刷新用量", BS_PUSHBUTTON, 876, 8, 80, 28, IDC_Q_REFRESH, MoveRight);
+    Mk(L"BUTTON", L"退出", BS_PUSHBUTTON, 964, 8, 92, 28, IDC_BTN_EXIT, MoveRight);
+
+    Mk(L"BUTTON", L"额度", BS_GROUPBOX, 12, 42, 1056, 126, -1, GrowWidth);
     const wchar_t* qlabels[3] = { L"5 小时", L"本周", L"本月" };
     for (int i = 0; i < 3; ++i) {
         int y = 66 + i * 30;
         Mk(L"STATIC", qlabels[i], SS_LEFT | SS_CENTERIMAGE, 26, y, 62, 16, IDC_Q_LABEL1 + i);
-        Mk(PROGRESS_CLASSW, L"", PBS_SMOOTH, 92, y, 300, 16, IDC_Q_BAR1 + i);
+        Mk(PROGRESS_CLASSW, L"", PBS_SMOOTH, 92, y, 250, 16, IDC_Q_BAR1 + i);
         SendMessageW(GetDlgItem(g_hwnd, IDC_Q_BAR1 + i), PBM_SETRANGE32, 0, 100);
-        Mk(L"STATIC", L"-", SS_LEFT | SS_CENTERIMAGE, 404, y, 520, 16, IDC_Q_INFO1 + i);
+        Mk(L"STATIC", L"-", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS,
+           354, y, 230, 16, IDC_Q_INFO1 + i);
     }
-    Mk(L"BUTTON", L"刷新额度", BS_PUSHBUTTON, 940, 62, 116, 28, IDC_Q_REFRESH);
+    Mk(L"STATIC", L"最近完成的请求", SS_LEFT | SS_CENTERIMAGE, 600, 43, 250, 17, -1);
+    HWND recent = Mk(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER,
+                     600, 61, 456, 104, IDC_RECENT_REQUESTS, GrowWidth, WS_EX_CLIENTEDGE);
+    ListView_SetExtendedListViewStyle(recent, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+    LVCOLUMNW recent_column = {};
+    recent_column.mask = LVCF_TEXT | LVCF_FMT;
+    recent_column.fmt = LVCFMT_LEFT;
+    for (int i = 0; i < 3; ++i) {
+        recent_column.pszText = const_cast<wchar_t*>(RECENT_REQUEST_COLUMNS[i]);
+        ListView_InsertColumn(recent, i, &recent_column);
+    }
+    HWND recent_header = ListView_GetHeader(recent);
+    SetWindowLongPtrW(recent_header, GWL_STYLE,
+                      GetWindowLongPtrW(recent_header, GWL_STYLE) | HDS_NOSIZING);
+    ResizeRecentRequestColumns();
 
-    Mk(L"BUTTON", L"模型", BS_GROUPBOX, 12, 176, 1056, 250, IDC_MODEL_GROUP);
+    Mk(L"BUTTON", L"模型", BS_GROUPBOX, 12, 176, 1056, 250, IDC_MODEL_GROUP, GrowWidth | GrowModelHeight);
     HWND lv = Mk(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER,
-                 24, 200, 1032, 176, IDC_MODELS, WS_EX_CLIENTEDGE);
+                 24, 200, 1032, 176, IDC_MODELS, GrowWidth | GrowModelHeight, WS_EX_CLIENTEDGE);
     ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
     SetWindowSubclass(lv, ModelsSubclass, 1, 0);
     struct { const wchar_t* name; int width; } cols[] = {
@@ -1029,33 +1091,33 @@ static void Layout() {
         ListView_InsertColumn(lv, i, &col);
     }
 
-    Mk(L"BUTTON", L"一键配置", BS_PUSHBUTTON, 24, 384, 84, 28, IDC_BTN_REFRESH);
-    Mk(L"BUTTON", L"探测免费模型", BS_PUSHBUTTON, 116, 384, 104, 28, IDC_BTN_PROBE);
-    Mk(L"BUTTON", L"导入列表至WB", BS_PUSHBUTTON, 228, 384, 112, 28, IDC_BTN_IMPORT);
-    Mk(L"BUTTON", L"测试已选模型", BS_PUSHBUTTON, 348, 384, 104, 28, IDC_BTN_SELFTEST);
-    Mk(L"BUTTON", L"刷新模型状态", BS_PUSHBUTTON, 460, 384, 96, 28, IDC_BTN_REFRESH_LIST);
-    Mk(L"BUTTON", L"清空WB列表", BS_PUSHBUTTON, 564, 384, 96, 28, IDC_BTN_PURGE);
-    Mk(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, 668, 386, 400, 22, IDC_HINT);
+    Mk(L"BUTTON", L"一键配置", BS_PUSHBUTTON, 24, 384, 84, 28, IDC_BTN_REFRESH, MoveBelowModels);
+    Mk(L"BUTTON", L"探测免费模型", BS_PUSHBUTTON, 116, 384, 104, 28, IDC_BTN_PROBE, MoveBelowModels);
+    Mk(L"BUTTON", L"导入列表至WB", BS_PUSHBUTTON, 228, 384, 112, 28, IDC_BTN_IMPORT, MoveBelowModels);
+    Mk(L"BUTTON", L"测试已选模型", BS_PUSHBUTTON, 348, 384, 104, 28, IDC_BTN_SELFTEST, MoveBelowModels);
+    Mk(L"BUTTON", L"刷新模型状态", BS_PUSHBUTTON, 460, 384, 96, 28, IDC_BTN_REFRESH_LIST, MoveBelowModels);
+    Mk(L"BUTTON", L"清空WB列表", BS_PUSHBUTTON, 564, 384, 96, 28, IDC_BTN_PURGE, MoveBelowModels);
+    Mk(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, 668, 386, 400, 22, IDC_HINT, GrowWidth | MoveBelowModels);
     SetRelayOnly(false);
 
-    Mk(L"STATIC", L"API Key", SS_LEFT | SS_CENTERIMAGE, 12, 439, 62, 20, -1);
-    HWND key = Mk(L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER, 78, 436, 280, 24, IDC_KEY, WS_EX_CLIENTEDGE);
+    Mk(L"STATIC", L"API Key", SS_LEFT | SS_CENTERIMAGE, 12, 439, 62, 20, -1, MoveBelowModels);
+    HWND key = Mk(L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER, 78, 436, 280, 24, IDC_KEY, MoveBelowModels, WS_EX_CLIENTEDGE);
     SendMessageW(key, EM_SETCUEBANNER, TRUE, (LPARAM)L"粘贴新的 oc_sk_... 后点保存");
-    Mk(L"BUTTON", L"保存", BS_PUSHBUTTON, 364, 436, 64, 24, IDC_BTN_KEY);
+    Mk(L"BUTTON", L"保存", BS_PUSHBUTTON, 364, 436, 64, 24, IDC_BTN_KEY, MoveBelowModels);
 
-    Mk(L"BUTTON", L"直连", BS_AUTORADIOBUTTON | WS_GROUP, 444, 438, 60, 20, IDC_RADIO_OFF);
-    Mk(L"BUTTON", L"自动", BS_AUTORADIOBUTTON, 508, 438, 60, 20, IDC_RADIO_AUTO);
-    Mk(L"BUTTON", L"手动", BS_AUTORADIOBUTTON, 572, 438, 60, 20, IDC_RADIO_MANUAL);
+    Mk(L"BUTTON", L"直连", BS_AUTORADIOBUTTON | WS_GROUP, 444, 438, 60, 20, IDC_RADIO_OFF, MoveBelowModels);
+    Mk(L"BUTTON", L"自动", BS_AUTORADIOBUTTON, 508, 438, 60, 20, IDC_RADIO_AUTO, MoveBelowModels);
+    Mk(L"BUTTON", L"手动", BS_AUTORADIOBUTTON, 572, 438, 60, 20, IDC_RADIO_MANUAL, MoveBelowModels);
     HWND url = Mk(L"EDIT", L"http://127.0.0.1:7897", ES_AUTOHSCROLL | WS_BORDER,
-                  636, 436, 240, 24, IDC_PROXY_URL, WS_EX_CLIENTEDGE);
+                  636, 436, 240, 24, IDC_PROXY_URL, MoveBelowModels, WS_EX_CLIENTEDGE);
     SendMessageW(url, EM_SETCUEBANNER, TRUE, (LPARAM)L"http://127.0.0.1:7897");
     SendMessageW(url, EM_SETLIMITTEXT, 128, 0);
     SetWindowSubclass(url, ProxyEditSubclass, 2, 0);
-    Mk(L"BUTTON", L"应用", BS_PUSHBUTTON, 884, 436, 64, 24, IDC_BTN_PROXY);
+    Mk(L"BUTTON", L"应用", BS_PUSHBUTTON, 884, 436, 64, 24, IDC_BTN_PROXY, MoveBelowModels);
 
-    Mk(L"BUTTON", L"日志", BS_GROUPBOX, 12, 470, 1056, 266, -1);
+    Mk(L"BUTTON", L"日志", BS_GROUPBOX, 12, 470, 1056, 266, -1, GrowWidth | MoveBelowModels | GrowLogHeight);
     HWND log = Mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER,
-                  24, 494, 1032, 230, IDC_LOG, WS_EX_CLIENTEDGE);
+                  24, 494, 1032, 230, IDC_LOG, GrowWidth | MoveBelowModels | GrowLogHeight, WS_EX_CLIENTEDGE);
     SendMessageW(log, EM_SETLIMITTEXT, 200000, 0);
     SendMessageW(log, WM_SETFONT, (WPARAM)g_font, TRUE);
 
@@ -1430,6 +1492,39 @@ static int MeasureTextWidth(HDC dc, HFONT font, const std::wstring& text) {
     GetTextExtentPoint32W(dc, text.c_str(), (int)text.size(), &size);
     SelectObject(dc, old);
     return size.cx;
+}
+
+static void ResizeRecentRequestColumns() {
+    HWND list = GetDlgItem(g_hwnd, IDC_RECENT_REQUESTS);
+    RECT client = {};
+    if (!GetClientRect(list, &client) || client.right < 5) return;
+    HDC dc = GetDC(list);
+    if (!dc) return;
+
+    HWND header = ListView_GetHeader(list);
+    HFONT cell_font = (HFONT)SendMessageW(list, WM_GETFONT, 0, 0);
+    HFONT header_font = (HFONT)SendMessageW(header, WM_GETFONT, 0, 0);
+    if (!cell_font) cell_font = g_font;
+    if (!header_font) header_font = cell_font;
+
+    std::array<int, 3> needs = {};
+    for (int i = 0; i < 3; ++i)
+        needs[i] = MeasureTextWidth(dc, header_font, RECENT_REQUEST_COLUMNS[i]);
+    needs[1] = std::max(needs[1], MeasureTextWidth(dc, cell_font, L"9999.9"));
+    for (const auto& row : g_recent_requests) {
+        for (int i = 0; i < 3; ++i)
+            needs[i] = std::max(needs[i], MeasureTextWidth(dc, cell_font, row[i]));
+    }
+    const int padding = MulDiv(16, std::max(96, GetDeviceCaps(dc, LOGPIXELSX)), 96);
+    ReleaseDC(list, dc);
+
+    const int available = static_cast<int>(client.right) - 2;
+    const int spare = std::max(0, available - needs[0] - needs[1] - needs[2] - 3 * padding);
+    const int rate_width = std::min(available - 2, needs[1] + padding + spare / 3);
+    const int ttft_width = std::min(available - rate_width - 1, needs[2] + padding + spare / 3);
+    ListView_SetColumnWidth(list, 0, available - rate_width - ttft_width);
+    ListView_SetColumnWidth(list, 1, rate_width);
+    ListView_SetColumnWidth(list, 2, ttft_width);
 }
 
 static void AutoSizeColumns() {
@@ -2142,9 +2237,34 @@ static void DoApplyProxy() {
     ApplyProxyMode(mode, url);
 }
 
+static void SetRecentRequests(const std::vector<RecentRequestRow>& rows) {
+    if (rows == g_recent_requests) return;
+    g_recent_requests = rows;
+
+    HWND list = GetDlgItem(g_hwnd, IDC_RECENT_REQUESTS);
+    SendMessageW(list, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(list);
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        const auto& [model, rate, ttft] = rows[i];
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT;
+        item.iItem = i;
+        item.pszText = const_cast<wchar_t*>(model.c_str());
+        int inserted = ListView_InsertItem(list, &item);
+        if (inserted >= 0) {
+            ListView_SetItemText(list, inserted, 1, const_cast<wchar_t*>(rate.c_str()));
+            ListView_SetItemText(list, inserted, 2, const_cast<wchar_t*>(ttft.c_str()));
+        }
+    }
+    ResizeRecentRequestColumns();
+    SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(list, nullptr, TRUE);
+}
+
 static void HandleStatus(const Resp* r) {
     g_status_busy = false;
     if (r->status != 200 || r->body.rfind("S ", 0) != 0) {
+        SetRecentRequests({{L"等待转发桥", L"—", L"—"}});
         g_running = false;
         // Keep "started by this panel" across the first polls while the
         // engine is still booting; a later failure clears it.
@@ -2190,6 +2310,21 @@ static void HandleStatus(const Resp* r) {
     g_launch_state = LAUNCH_NONE;
     g_running = true;
     g_key_masked = kv["key"];
+    std::vector<RecentRequestRow> recent;
+    const bool supports_timing = kv.find("latest_ttft_s") != kv.end();
+    if (supports_timing) {
+        for (const std::string prefix : {"latest", "recent_2", "recent_3"}) {
+            const auto model = U8ToW(kv[prefix + "_model"]);
+            if (model.empty()) break;
+            const auto rate = U8ToW(kv[prefix + "_tok_s"]);
+            const auto ttft = U8ToW(kv[prefix + "_ttft_s"]);
+            recent.push_back({model, rate.empty() ? L"—" : rate, ttft.empty() ? L"—" : ttft});
+        }
+    }
+    if (recent.empty()) {
+        recent.push_back({supports_timing ? L"等待模型请求" : L"请重启至新版转发桥", L"—", L"—"});
+    }
+    SetRecentRequests(recent);
     SetRelayOnly(true);
 
     // First successful status after the relay came up: pull the data that
@@ -2629,8 +2764,7 @@ enum {
 
 static void ShowPanel() {
     if (!g_hwnd) return;
-    ShowWindow(g_hwnd, SW_SHOW);
-    ShowWindow(g_hwnd, SW_RESTORE);
+    ShowWindow(g_hwnd, IsIconic(g_hwnd) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(g_hwnd);
 }
 
@@ -2781,7 +2915,40 @@ static void TrayMenu() {
 // window proc
 // --------------------------------------------------------------------------- //
 
+static SIZE MinimumWindowSize() {
+    RECT rect = {0, 0, CLIENT_W, CLIENT_H};
+    AdjustWindowRect(&rect, PANEL_STYLE, FALSE);
+    return {rect.right - rect.left, rect.bottom - rect.top};
+}
+
+static void FitNormalWindowToWorkArea(HWND hwnd) {
+    if (IsIconic(hwnd) || IsZoomed(hwnd)) return;
+
+    RECT rect = {};
+    MONITORINFO monitor = {sizeof(monitor)};
+    if (!GetWindowRect(hwnd, &rect) ||
+        !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+
+    const RECT& work = monitor.rcWork;
+    const SIZE minimum = MinimumWindowSize();
+    const LONG width = std::clamp(rect.right - rect.left, minimum.cx,
+                                  std::max(minimum.cx, work.right - work.left));
+    const LONG height = std::clamp(rect.bottom - rect.top, minimum.cy,
+                                   std::max(minimum.cy, work.bottom - work.top));
+    // If the work area is smaller than the minimum, keep the caption buttons reachable.
+    const LONG x = width > work.right - work.left
+                 ? work.right - width : std::clamp(rect.left, work.left, work.right - width);
+    const LONG y = std::clamp(rect.top, work.top, std::max(work.top, work.bottom - height));
+
+    if (x != rect.left || y != rect.top || width != rect.right - rect.left ||
+        height != rect.bottom - rect.top) {
+        SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    static bool was_minimized_or_maximized = false;
+    static int last_client_width = CLIENT_W;
     if (g_taskbar_created && msg == g_taskbar_created) {
         TrayRemove();
         TrayAdd();
@@ -2790,7 +2957,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE:
             g_hwnd = hwnd;
-            Layout();
+            CreateControls();
             LoadToken();
             SetTimer(hwnd, 1, 2000, nullptr);
             SetTimer(hwnd, 2, 6000, nullptr);
@@ -2814,6 +2981,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RefreshModelsAsync();
             RefreshQuotaAsync();
             RefreshLogAsync();
+            return 0;
+
+        case WM_GETMINMAXINFO: {
+            const SIZE minimum = MinimumWindowSize();
+            auto* info = reinterpret_cast<MINMAXINFO*>(lp);
+            info->ptMinTrackSize.x = minimum.cx;
+            info->ptMinTrackSize.y = minimum.cy;
+            info->ptMaxTrackSize.x = std::max(info->ptMaxTrackSize.x, minimum.cx);
+            info->ptMaxTrackSize.y = std::max(info->ptMaxTrackSize.y, minimum.cy);
+            return 0;
+        }
+
+        case WM_SIZE:
+            if (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) {
+                const int width = LOWORD(lp);
+                ResizeControls(width, HIWORD(lp));
+                if (width != last_client_width) {
+                    AutoSizeColumns();
+                    ResizeRecentRequestColumns();
+                    last_client_width = width;
+                }
+                if (wp == SIZE_RESTORED && was_minimized_or_maximized)
+                    PostMessageW(hwnd, WM_APP_FIT_WINDOW, 0, 0);
+            }
+            if (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED || wp == SIZE_MINIMIZED)
+                was_minimized_or_maximized = wp != SIZE_RESTORED;
+            return 0;
+
+        case WM_DISPLAYCHANGE:
+        case WM_SETTINGCHANGE:
+            if (msg == WM_DISPLAYCHANGE || wp == SPI_SETWORKAREA)
+                PostMessageW(hwnd, WM_APP_FIT_WINDOW, 0, 0);
+            break;
+
+        case WM_APP_FIT_WINDOW:
+            FitNormalWindowToWorkArea(hwnd);
             return 0;
 
         case WM_TIMER:
@@ -3004,8 +3207,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     lf.lfHeight = -13;
     wcscpy(lf.lfFaceName, L"Microsoft YaHei UI");
     g_font = CreateFontIndirectW(&lf);
-    lf.lfWeight = FW_SEMIBOLD;
-    g_font_bold = CreateFontIndirectW(&lf);
 
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
@@ -3032,16 +3233,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         return 0;
     }
 
-    RECT rc = { 0, 0, CLIENT_W, CLIENT_H };
-    AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
+    const SIZE minimum = MinimumWindowSize();
     HWND hwnd = CreateWindowExW(
-        0, L"OpenCodeGoPanel", L"OCSub2WB",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
+        0, L"OpenCodeGoPanel", L"OCSub2WB", PANEL_STYLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, minimum.cx, minimum.cy,
         nullptr, nullptr, inst, nullptr);
     if (!hwnd) return 1;
 
     ShowWindow(hwnd, show);
+    FitNormalWindowToWorkArea(hwnd);
     UpdateWindow(hwnd);
 
     MSG msg;
@@ -3051,6 +3251,5 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
     WSACleanup();
     if (g_font) DeleteObject(g_font);
-    if (g_font_bold) DeleteObject(g_font_bold);
     return 0;
 }

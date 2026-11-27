@@ -20,6 +20,7 @@ test uses ``--port 0`` and a private token/pid/log directory.
 from __future__ import annotations
 
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import importlib
 import importlib.util
@@ -165,6 +166,11 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         if mode == "break":
             self._send_chunks([BREAK_CHUNK], terminate=False)
             return
+        if mode == "delayed_json":
+            owner.delayed_started.set()
+            if not owner.release_delayed.wait(5):
+                self.close_connection = True
+                return
         if mode == "sse":
             self._send_chunks(owner.sse_chunks, terminate=True)
             return
@@ -172,7 +178,7 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
             self._send(429, RATE_LIMIT_BODY, "application/json",
                        {"Retry-After": "7"})
             return
-        self._send(200, JSON_BODY, "application/json")
+        self._send(200, owner.json_body, "application/json")
 
     def _send(self, status, data, ctype, extra=None):
         self.send_response(status)
@@ -214,11 +220,14 @@ class _UpstreamServer(ThreadingHTTPServer):
 
 
 class _FakeUpstream:
-    def __init__(self, address="127.0.0.1", modes=None, sse_chunks=None):
+    def __init__(self, address="127.0.0.1", modes=None, sse_chunks=None, json_body=JSON_BODY):
         self.lock = threading.Lock()
         self.requests: list[dict] = []
         self.modes = list(modes or [])
         self.sse_chunks = list(sse_chunks or _sse_tool_chunks())
+        self.json_body = json_body
+        self.delayed_started = threading.Event()
+        self.release_delayed = threading.Event()
         self.hang_seconds = 0.8
         self.server = _UpstreamServer((address, 0), self)
         self.host, self.port = self.server.server_address[:2]
@@ -265,6 +274,7 @@ CONFIG_ATTRS = (
     "models_cache",
     "models_count",
     "requests_total",
+    "recent_responses",
 )
 _MISSING = object()
 
@@ -351,6 +361,7 @@ class _RelayTestBase(unittest.TestCase):
         config.models_cache = None
         config.models_count = 0
         config.requests_total = 0
+        config.recent_responses = ()
         return self._start_relay()
 
     def _request(self, method, path, body=None, headers=None, port=None,
@@ -465,6 +476,167 @@ class RelayDataPathTest(_RelayTestBase):
                 for call in choice.get("delta", {}).get("tool_calls", []):
                     arguments += call.get("function", {}).get("arguments", "")
         self.assertEqual(json.loads(arguments), {"city": "Paris"})
+
+    def _recent(self):
+        status, _, body = self._request(
+            "GET", "/api/status", headers={"X-OCGO-Token": API_TOKEN})
+        self.assertEqual(status, 200)
+        fields = dict(field.split("=", 1) for field in body.decode().split() if "=" in field)
+        return [(fields[f"{prefix}_model"], fields[f"{prefix}_tok_s"], fields[f"{prefix}_ttft_s"])
+                for prefix in ("latest", "recent_2", "recent_3")
+                if fields.get(f"{prefix}_model")]
+
+    def _latest(self):
+        recent = self._recent()
+        return recent[0] if recent else ("", "", "")
+
+    def _wait_latest(self, model):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            actual, rate, ttft = self._latest()
+            if actual == model:
+                return rate, ttft
+            time.sleep(0.01)
+        self.fail(f"latest completed model did not become {model!r}")
+
+    def test_sse_reports_usage_without_changing_the_upstream_response(self):
+        usage = [b'data: {"choices": [],\r\n', b'data: "usage": {"completion_tokens": 2',
+                 b'4}}\r\n\r\n']
+        chunks = _sse_tool_chunks()
+        chunks[-1:-1] = usage
+        upstream = self._start_upstream(modes=["sse", "sse"], sse_chunks=chunks)
+        self._serve(upstream)
+        self.assertEqual(self._latest(), ("", "", ""))
+
+        request = {"model": MODEL, "messages": [], "stream": True,
+                   "stream_options": {"include_obfuscation": False}}
+        status, _, body = self._post_chat(request)
+        self.assertEqual((status, body), (200, b"".join(chunks)))
+        expected = {**request, "stream_options": {"include_obfuscation": False,
+                                                  "include_usage": True}}
+        self.assertEqual(json.loads(upstream.requests[0]["body"]), expected)
+        rate, ttft = self._wait_latest(MODEL)
+        self.assertGreater(float(rate), 0.0)
+        self.assertGreaterEqual(float(ttft), 0.0)
+
+        request["model"] = "explicit-options"
+        request["stream_options"]["include_usage"] = False
+        self._post_chat(request)
+        self.assertEqual(upstream.requests[1]["body"],
+                         json.dumps(request, separators=(",", ":")).encode())
+        self.assertEqual(len(upstream.requests), 2)
+
+    def test_without_usage_the_model_updates_and_selftest_or_errors_do_not_replace_it(self):
+        upstream = self._start_upstream(modes=["sse", "429", "json", "sse"])
+        self._serve(upstream)
+        self._post_chat({"model": "no-usage", "stream": True})
+        rate, ttft = self._wait_latest("no-usage")
+        self.assertEqual(rate, "")
+        self.assertGreaterEqual(float(ttft), 0.0)
+        self._post_chat({"model": "failed"})
+        self._post_chat({"model": "selftest"}, {"X-OCGO-Selftest": "1"})
+        self._post_chat({"model": "selftest", "stream": True}, {"X-OCGO-Selftest": "1"})
+        self.assertEqual(self._latest(), ("no-usage", "", ttft))
+        self.assertNotIn("x-ocgo-selftest", upstream.requests[2]["headers"])
+        self.assertNotIn("stream_options", json.loads(upstream.requests[3]["body"]))
+
+    def test_concurrent_requests_use_completion_order(self):
+        response = json.loads(JSON_BODY)
+        response["usage"] = {"completion_tokens": 20}
+        upstream = self._start_upstream(modes=["delayed_json", "json"],
+                                        json_body=json.dumps(response).encode())
+        self._serve(upstream)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            first = worker.submit(self._post_chat, {"model": "first-started"})
+            try:
+                self.assertTrue(upstream.delayed_started.wait(2))
+                self.assertEqual(self._post_chat({"model": "second-started"})[0], 200)
+                self.assertEqual(self._wait_latest("second-started"), ("", ""))
+            finally:
+                upstream.release_delayed.set()
+            self.assertEqual(first.result()[0], 200)
+        self.assertEqual(self._wait_latest("first-started"), ("", ""))
+        self.assertEqual([model for model, _, _ in self._recent()],
+                         ["first-started", "second-started"])
+
+    def test_recent_requests_keep_three_rows_including_repeated_models(self):
+        upstream = self._start_upstream()
+        self._serve(upstream)
+        for model in ("oldest", "repeat", "middle", "repeat"):
+            self.assertEqual(self._post_chat({"model": model})[0], 200)
+            self.assertEqual(self._wait_latest(model), ("", ""))
+        self.assertEqual(self._recent(), [("repeat", "", ""), ("middle", "", ""), ("repeat", "", "")])
+
+    def test_reasoning_and_stream_trailers_do_not_reduce_output_rate(self):
+        for usage in (
+            {"completion_tokens": 1000, "completion_tokens_details": {"reasoning_tokens": 901}},
+            {"completion_tokens": 1000, "opencode": {"tokens": {"output": 1000, "reasoning": 901}}},
+        ):
+            with self.subTest(usage=usage):
+                stream = self.proxy.StreamUsage()
+                stream.feed(b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n', 1.0)
+                stream.feed(b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n', 2.0)
+                self.assertEqual(stream.metrics(0.0), (None, None))
+                stream.feed(b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n', 8.0)
+                stream.feed(b'data: {"choices":[{"delta":{"content":"last"}}]}\n\n', 10.0)
+                stream.feed(b'data: ' + json.dumps({"usage": usage}).encode() + b"\n\n", 12.0)
+                stream.feed(b"data: [DONE]\n\n", 13.0)
+                self.assertEqual(stream.metrics(0.0), (49.0, 8.0))
+
+    def test_unseparated_reasoning_and_coalesced_output_keep_ttft_only(self):
+        frames = [
+            b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"last"}}]}\n\n',
+        ]
+        scenarios = [
+            [(1.0, b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n'),
+             (2.0, frames[0]), (3.0, frames[1])],
+            [(2.0, b"".join(frames))],
+        ]
+        for events in scenarios:
+            with self.subTest(events=events):
+                stream = self.proxy.StreamUsage()
+                for timestamp, data in events:
+                    stream.feed(data, timestamp)
+                stream.feed(b'data: {"usage":{"completion_tokens":24}}\n\n', 4.0)
+                self.assertEqual(stream.metrics(0.0), (None, 2.0))
+
+    def test_stream_metrics_for_messages_and_responses(self):
+        fixtures = [
+            ("/v1/messages", [
+                {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "think"}},
+                {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}},
+                {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "last"}},
+                {"type": "message_delta", "usage": {"output_tokens": 19,
+                                                    "output_tokens_details": {"thinking_tokens": 10}}},
+                {"type": "message_stop"},
+            ], 8.0),
+            ("/v1/responses", [
+                {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+                {"type": "response.output_text.delta", "delta": "first"},
+                {"type": "response.output_text.delta", "delta": "last"},
+                {"type": "response.completed", "response": {"usage": {"output_tokens": 22,
+                    "output_tokens_details": {"reasoning_tokens": 9}}}},
+            ], 12.0),
+        ]
+        for path, events, expected_rate in fixtures:
+            with self.subTest(path=path):
+                chunks = [b"data: " + json.dumps(event).encode() + b"\n\n" for event in events]
+                parser = self.proxy.StreamUsage()
+                for timestamp, chunk in enumerate(chunks, start=1):
+                    parser.feed(chunk, timestamp)
+                self.assertEqual(parser.metrics(0.0), (expected_rate, 2.0))
+
+                upstream = self._start_upstream(modes=["sse"], sse_chunks=chunks)
+                self._serve(upstream)
+                body = b'{"model":"native-stream","stream":true}'
+                status, _, result = self._request(
+                    "POST", path, body, {"Content-Type": "application/json"})
+                self.assertEqual((status, result), (200, b"".join(chunks)))
+                rate, ttft = self._wait_latest("native-stream")
+                self.assertGreater(float(rate), 0.0)
+                self.assertGreaterEqual(float(ttft), 0.0)
+                self.assertEqual(upstream.requests[0]["body"], body)
 
     def test_429_status_and_retry_after_survive(self):
         upstream = self._start_upstream(modes=["429"])

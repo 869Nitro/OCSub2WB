@@ -78,7 +78,13 @@ using System.Runtime.InteropServices;
 using System.Text;
 public static class PanelSmoke {
     [StructLayout(LayoutKind.Sequential)]
-    public struct Rect { public int Left, Top, Right, Bottom; }
+    public struct Rect {
+        public int Left, Top, Right, Bottom;
+        public int Width => Right - Left;
+        public int Height => Bottom - Top;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern IntPtr FindWindow(string cls, string title);
     [DllImport("user32.dll")]
@@ -99,6 +105,29 @@ public static class PanelSmoke {
     public static extern bool ShowWindow(IntPtr hwnd, int cmd);
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")]
+    public static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+    public static Rect Bounds(IntPtr hwnd) {
+        Rect rect;
+        if (!GetWindowRect(hwnd, out rect)) throw new InvalidOperationException("Window bounds unavailable");
+        return rect;
+    }
+    public static Rect WorkArea(IntPtr hwnd) {
+        var info = new MonitorInfo { Size = Marshal.SizeOf(typeof(MonitorInfo)) };
+        if (!GetMonitorInfo(MonitorFromWindow(hwnd, 2), ref info))
+            throw new InvalidOperationException("Monitor work area unavailable");
+        return info.Work;
+    }
+    public static void Position(IntPtr hwnd, int x, int y, int width, int height) {
+        if (!SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, 0x0014))
+            throw new InvalidOperationException("Could not position the test window");
+    }
     [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
     public static bool Owns(IntPtr hwnd, uint expected) {
@@ -150,6 +179,53 @@ function Send-PanelMessage([IntPtr]$Target, [uint32]$Message, [int]$Parameter = 
     }
 }
 
+function Test-PanelWindow([IntPtr]$Window) {
+    $null = Wait-Value 'the panel controls' {
+        [PanelSmoke]::GetDlgItem($Window, 1021) -ne [IntPtr]::Zero -and
+            [PanelSmoke]::GetDlgItem($Window, 1051) -ne [IntPtr]::Zero
+    }
+    $initial = [PanelSmoke]::Bounds($Window)
+    $models = [PanelSmoke]::GetDlgItem($Window, 1021)
+    $log = [PanelSmoke]::GetDlgItem($Window, 1051)
+    $modelsInitial = [PanelSmoke]::Bounds($models)
+    $logInitial = [PanelSmoke]::Bounds($log)
+
+    [PanelSmoke]::Position($Window, $initial.Left, $initial.Top, ($initial.Width + 120), ($initial.Height + 100))
+    $grown = [PanelSmoke]::Bounds($Window)
+    $modelsGrown = [PanelSmoke]::Bounds($models)
+    $logGrown = [PanelSmoke]::Bounds($log)
+    if ($grown.Width -le $initial.Width -or $grown.Height -le $initial.Height -or
+        $modelsGrown.Width -le $modelsInitial.Width -or $modelsGrown.Height -le $modelsInitial.Height -or
+        $logGrown.Width -le $logInitial.Width -or $logGrown.Height -le $logInitial.Height) {
+        throw 'Resizing the panel did not expand the model list and log'
+    }
+
+    $work = [PanelSmoke]::WorkArea($Window)
+    [PanelSmoke]::Position($Window, ($work.Right - 100), ($work.Bottom - 100), ($initial.Width - 120), ($initial.Height - 100))
+    $minimum = [PanelSmoke]::Bounds($Window)
+    if ($minimum.Width -ne $initial.Width -or $minimum.Height -ne $initial.Height) {
+        throw 'The panel did not enforce its initial size as the minimum'
+    }
+    if ($minimum.Right -le $work.Right -or $minimum.Bottom -le $work.Bottom) {
+        throw 'Could not position the test window outside the work area'
+    }
+    Send-PanelMessage $Window 0x007E 32 # WM_DISPLAYCHANGE
+    $normal = Wait-Value 'the panel to move into the current work area' {
+        $bounds = [PanelSmoke]::Bounds($Window)
+        if ($bounds.Right -le $work.Right -and $bounds.Top -ge $work.Top -and
+            $bounds.Bottom -le [Math]::Max($work.Bottom, $work.Top + $initial.Height)) { $bounds }
+    }
+
+    Send-PanelMessage $Window 0x0112 0xF030 # WM_SYSCOMMAND / SC_MAXIMIZE
+    $null = Wait-Value 'the panel to maximize' { [PanelSmoke]::IsZoomed($Window) }
+    Send-PanelMessage $Window 0x0112 0xF120 # WM_SYSCOMMAND / SC_RESTORE
+    $null = Wait-Value 'the panel to restore to its previous size' {
+        $bounds = [PanelSmoke]::Bounds($Window)
+        !$([PanelSmoke]::IsZoomed($Window)) -and $bounds.Width -eq $normal.Width -and
+            $bounds.Height -eq $normal.Height
+    }
+}
+
 function Get-Health {
     try { Invoke-RestMethod -Uri 'http://127.0.0.1:8787/healthz' -NoProxy -TimeoutSec 1 }
     catch { $null }
@@ -190,6 +266,8 @@ try {
         $found = [PanelSmoke]::FindWindow('OpenCodeGoPanel', 'OCSub2WB')
         if ([PanelSmoke]::Owns($found, [uint32]$panel.Id)) { $found }
     }
+
+    Test-PanelWindow $window
 
     Send-PanelMessage $window 0x0111 1002
     $alert = Wait-Value 'the port-occupied alert' {
@@ -239,7 +317,7 @@ try {
     }
     Send-PanelMessage $confirm 0x0111 6
     if (!$panel.WaitForExit(7000)) { throw 'The panel did not exit' }
-    Write-Host 'PASS occupied port, packaged startup from a Unicode profile without Python on PATH, tray reuse, stop and exit'
+    Write-Host 'PASS window resize, maximize and restore, display-change recovery, occupied port, packaged startup, tray reuse, stop and exit'
 } finally {
     $busy.Stop()
     if ($duplicate) {

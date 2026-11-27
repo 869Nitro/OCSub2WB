@@ -13,7 +13,7 @@ proper user-agent, and otherwise forwards bytes verbatim.
 
 Design rules:
   * standard library only, no dependencies
-  * never rewrite the request body (only a read-only peek to derive a session id)
+  * preserve client requests except to request missing Chat Completions stream usage
   * streaming responses are relayed chunk by chunk with an explicit flush
   * binds 127.0.0.1 only
   * one instance per port (Windows happily double-binds, so we probe first)
@@ -50,6 +50,7 @@ DEFAULT_UPSTREAM = "https://opencode.ai/inference/go"
 DEFAULT_UA = oc.USER_AGENT
 FALLBACK_SESSION = "ses_wb_fallback"
 MAX_STREAM_BYTES = 8 * 1024 * 1024  # don't parse bodies larger than this
+MAX_USAGE_EVENT_BYTES = 512 * 1024
 CONNECT_TIMEOUT = 10.0
 READ_TIMEOUT = 180.0
 LOG_KEEP_DAYS = 7
@@ -219,6 +220,182 @@ class RequestLog:
             pass
 
 
+def as_object(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def token_count(value: object) -> int | None:
+    return value if type(value) is int and 0 <= value <= 2**53 - 1 else None
+
+
+def output_tokens(usage: dict, saw_reasoning: bool, saw_tools: bool) -> int | None:
+    """Count generated output using compatible counters from the same source."""
+    total = None
+    for field in ("completion_tokens", "output_tokens"):
+        total = token_count(usage.get(field))
+        if total is None:
+            continue
+        details = as_object(usage.get(f"{field}_details"))
+        text = token_count(details.get("text_tokens"))
+        if text is not None and not saw_tools:
+            return text
+        for key in ("reasoning_tokens", "thinking_tokens"):
+            reasoning = token_count(details.get(key))
+            if reasoning is not None and reasoning <= total:
+                return total - reasoning
+        break
+
+    tokens = as_object(as_object(usage.get("opencode")).get("tokens"))
+    billed = token_count(tokens.get("output"))
+    reasoning = token_count(tokens.get("reasoning"))
+    if billed is not None and reasoning is not None and reasoning <= billed:
+        return billed - reasoning
+    if saw_reasoning or reasoning:
+        return None
+    return total if total is not None else billed
+
+
+def response_object(data: bytes) -> dict:
+    try:
+        response = json.loads(data)
+    except (ValueError, RecursionError):
+        return {}
+    return as_object(response)
+
+
+class StreamUsage:
+    """Read bounded SSE usage and output timings alongside the untouched stream."""
+
+    def __init__(self):
+        self.first_output: float | None = None
+        self.last_output: float | None = None
+        self.saw_reasoning = False
+        self.saw_tools = False
+        self.usage: dict = {}
+        self.complete = False
+        self.failed = False
+        self._line = b""
+        self._data = bytearray()
+        self._skip_line = False
+        self._skip_event = False
+
+    def feed(self, chunk: bytes, received: float) -> None:
+        lines = (self._line + chunk).split(b"\n")
+        self._line = lines.pop()
+        for line in lines:
+            if self._skip_line:
+                self._skip_line = False
+                continue
+            line = line.rstrip(b"\r")
+            if not line:
+                if self._data and not self._skip_event:
+                    self._read_event(bytes(self._data).strip(), received)
+                self._data.clear()
+                self._skip_event = False
+            elif not self._skip_event and line.startswith(b"data:"):
+                data = line[5:]
+                if len(self._data) + len(data) + 1 > MAX_USAGE_EVENT_BYTES:
+                    self._data.clear()
+                    self._skip_event = True
+                else:
+                    self._data.extend(data.removeprefix(b" "))
+                    self._data.append(10)
+        if len(self._line) > MAX_USAGE_EVENT_BYTES:
+            self._line = b""
+            self._skip_line = self._skip_event = True
+            self._data.clear()
+
+    def metrics(self, started: float) -> tuple[float | None, float | None]:
+        if self.first_output is None:
+            return None, None
+        ttft = self.first_output - started
+        duration = self.last_output - self.first_output
+        count = output_tokens(self.usage, self.saw_reasoning, self.saw_tools)
+        rate = (count - 1) / duration if count is not None and count > 1 and duration > 0 else None
+        return rate, ttft
+
+    def _output(self, value: object, received: float) -> None:
+        if isinstance(value, str) and value:
+            if self.first_output is None:
+                self.first_output = received
+            self.last_output = received
+
+    def _tool_output(self, tool: dict, received: float) -> None:
+        if tool:
+            self.saw_tools = True
+            self._output(tool.get("arguments") or tool.get("name"), received)
+
+    def _read_event(self, data: bytes, received: float) -> None:
+        if data == b"[DONE]":
+            self.complete = True
+            return
+        event = response_object(data)
+        kind = event.get("type")
+        if event.get("error") or kind in ("error", "response.failed", "response.incomplete"):
+            self.failed = True
+            return
+        if kind in ("message_stop", "response.completed"):
+            self.complete = True
+        choices = event.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                finish_reason = choice.get("finish_reason")
+                if finish_reason:
+                    self.complete = True
+                if finish_reason in ("tool_calls", "function_call"):
+                    self.saw_tools = True
+                delta = as_object(choice.get("delta"))
+                if any(delta.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details")):
+                    self.saw_reasoning = True
+                self._output(delta.get("content") or delta.get("refusal"), received)
+                self._tool_output(as_object(delta.get("function_call")), received)
+                tools = delta.get("tool_calls")
+                if isinstance(tools, list):
+                    self.saw_tools |= bool(tools)
+                    for tool in tools:
+                        self._tool_output(as_object(as_object(tool).get("function")), received)
+
+        if kind == "content_block_start":
+            block = as_object(event.get("content_block"))
+            if block.get("type") == "text":
+                self._output(block.get("text"), received)
+            elif block.get("type") in ("tool_use", "server_tool_use"):
+                self._tool_output(block, received)
+            elif block.get("type") in ("thinking", "redacted_thinking"):
+                self.saw_reasoning = True
+        elif kind == "content_block_delta":
+            delta = as_object(event.get("delta"))
+            if delta.get("type") == "text_delta":
+                self._output(delta.get("text"), received)
+            elif delta.get("type") == "input_json_delta":
+                self.saw_tools = True
+                self._output(delta.get("partial_json"), received)
+            elif delta.get("type") == "thinking_delta":
+                self.saw_reasoning = True
+        elif kind in ("response.output_text.delta", "response.refusal.delta"):
+            self._output(event.get("delta"), received)
+        elif kind in ("response.function_call_arguments.delta", "response.custom_tool_call_input.delta"):
+            self.saw_tools = True
+            self._output(event.get("delta"), received)
+        elif kind in ("response.output_item.added", "response.output_item.done"):
+            item = as_object(event.get("item"))
+            if item.get("type") == "reasoning":
+                self.saw_reasoning = True
+            elif item.get("type") in ("function_call", "custom_tool_call"):
+                self.saw_tools = True
+                if kind == "response.output_item.added":
+                    self._output(item.get("name"), received)
+        elif isinstance(kind, str) and kind.startswith("response.reasoning"):
+            self.saw_reasoning = True
+
+        response = as_object(event.get("response")) if kind == "response.completed" else event
+        usage = as_object(response.get("usage"))
+        if any(field in usage for field in ("completion_tokens", "output_tokens", "opencode")):
+            self.usage = usage
+
+
 # --------------------------------------------------------------------------- #
 # path mapping
 # --------------------------------------------------------------------------- #
@@ -292,6 +469,7 @@ class Config:
     jobs: dict[str, dict] = {}
     job_seq = 0
     quota_cache: tuple[float, dict] | None = None
+    recent_responses: tuple[tuple[float, str, float | None, float | None], ...] = ()
 
 
 def _prune_jobs_locked(keep: int = 20) -> None:
@@ -420,6 +598,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeDecodeError):
                 payload = None
         model = payload.get("model") if payload else None
+        if not isinstance(model, str):
+            model = None
         session = self._session_for(body, payload)
         is_chat = any(part in upstream_path for part in
                       ("/chat/completions", "/messages", "/responses"))
@@ -442,6 +622,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                 Config.log.write(f"GET {raw_path} 200 {len(cached[1])}B cached")
                 return
 
+        endpoint = upstream_path.rstrip("/")
+        measure = (method == "POST" and
+                   endpoint.endswith(("/chat/completions", "/messages", "/responses")) and
+                   model is not None and 0 < len(model) <= 256 and
+                   model.isprintable() and not any(char.isspace() for char in model) and
+                   self.headers.get("x-ocgo-selftest") != "1")
+        if measure and endpoint.endswith("/chat/completions"):
+            body = self._request_stream_usage(body, payload)
+
         headers = self._upstream_headers(session)
         target = upstream_path + (("?" + query) if query else "")
 
@@ -449,6 +638,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         status = 0
         sent = 0
         try:
+            upstream_started = time.perf_counter()
             conn = self._open_upstream(proxy)
             Config.log.write(f"{method} {raw_path} route={route} model={model or '-'} "
                              f"proxy={proxy or 'direct'}")
@@ -464,16 +654,27 @@ class RelayHandler(BaseHTTPRequestHandler):
                 streaming = resp.getheader("transfer-encoding", "").lower() == "chunked" \
                     and method != "HEAD" and "application/json" not in ctype
 
+            collect = measure and 200 <= status < 300
             if method == "HEAD":
                 self._write_headers(status, resp, length=0)
                 self.close_connection = True
                 sent = 0
             elif streaming:
-                sent = self._relay_stream(resp, status)
+                usage = StreamUsage() if collect else None
+                sent = self._relay_stream(resp, status, usage)
+                if usage and usage.complete and not usage.failed:
+                    self._record_response(model, *usage.metrics(upstream_started))
             else:
-                sent, payload = self._relay_buffered(resp, status)
+                sent, response_body = self._relay_buffered(resp, status)
                 if method == "GET" and upstream_path.endswith("/v1/models") and status == 200:
-                    Config.models_cache = (time.time(), payload)
+                    Config.models_cache = (time.time(), response_body)
+                if collect:
+                    response = (response_object(response_body)
+                                if len(response_body) <= MAX_STREAM_BYTES else {})
+                    if not response.get("error") and response.get("status") not in (
+                        "failed", "incomplete", "cancelled"
+                    ):
+                        self._record_response(model, None, None)
 
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             Config.log.write(f"{method} {raw_path} client_abort after {status}")
@@ -503,6 +704,26 @@ class RelayHandler(BaseHTTPRequestHandler):
         )
 
     # -- request pieces --------------------------------------------------- #
+
+    @staticmethod
+    def _request_stream_usage(body: bytes, payload: dict) -> bytes:
+        if payload.get("stream") is not True:
+            return body
+        options = payload.get("stream_options", {})
+        if not isinstance(options, dict) or "include_usage" in options:
+            return body
+        return json.dumps(
+            {**payload, "stream_options": {**options, "include_usage": True}},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @staticmethod
+    def _record_response(model: str, rate: float | None, ttft: float | None) -> None:
+        finished = time.perf_counter()
+        with Config.lock:
+            samples = [(finished, model, rate, ttft), *Config.recent_responses]
+            samples.sort(key=lambda sample: sample[0], reverse=True)
+            Config.recent_responses = tuple(samples[:3])
 
     def _open_upstream(self, proxy: str | None):
         """Open the upstream connection, retrying once on a handshake hiccup.
@@ -576,7 +797,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             lower = key.lower()
             if lower in HOP_BY_HOP:
                 continue
-            if lower in ("user-agent", "accept-encoding", "x-opencode-session", "host"):
+            if lower in ("user-agent", "accept-encoding", "x-opencode-session", "x-ocgo-selftest", "host"):
                 continue
             headers[lower] = value
 
@@ -617,7 +838,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
         return len(payload), payload
 
-    def _relay_stream(self, resp, status: int) -> int:
+    def _relay_stream(self, resp, status: int, usage: StreamUsage | None = None) -> int:
         if Config.close_delimited:
             self._write_headers(status, resp, length=None, chunked=False)
         else:
@@ -628,6 +849,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             chunk = resp.read1(65536)
             if not chunk:
                 break
+            received = time.perf_counter() if usage else 0.0
             total += len(chunk)
             if Config.close_delimited:
                 self.wfile.write(chunk)
@@ -636,6 +858,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.write(b"\r\n")
             self.wfile.flush()
+            if usage:
+                usage.feed(chunk, received)
         if not Config.close_delimited:
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
@@ -722,6 +946,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                 mode = Config.upstream_mode
                 proxy = Config.proxy_url or ""
                 token_masked = oc.mask_key(Config.fallback_key)
+                recent = Config.recent_responses
+            recent_fields = []
+            for index, (_, model, rate, ttft) in enumerate(recent, start=1):
+                prefix = "latest" if index == 1 else f"recent_{index}"
+                recent_fields.append(f"{prefix}_model={model}")
+                rate_text = f"{rate:.1f}" if rate is not None else ""
+                recent_fields.append(f"{prefix}_tok_s={rate_text}")
+                ttft_text = f"{ttft:.3f}" if ttft is not None else ""
+                recent_fields.append(f"{prefix}_ttft_s={ttft_text}")
             count = oc.managed_count()
             models_state = "recovered" if oc.models_load_state()["recovered"] else "ok"
             self._text(200, " ".join([
@@ -737,6 +970,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 f"models={count}",
                 f"models_state={models_state}",
                 f"requests={Config.requests_total}",
+                *(recent_fields or ["latest_model=", "latest_tok_s=", "latest_ttft_s="]),
                 f"uptime={int(time.time() - Config.started_at)}",
             ]))
             return
