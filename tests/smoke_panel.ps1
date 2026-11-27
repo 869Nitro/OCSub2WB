@@ -124,8 +124,11 @@ public static class PanelSmoke {
             throw new InvalidOperationException("Monitor work area unavailable");
         return info.Work;
     }
-    public static void Position(IntPtr hwnd, int x, int y, int width, int height) {
-        if (!SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, 0x0014))
+    public static void Position(IntPtr hwnd, int x, int y, int width, int height, bool checkTrackLimits) {
+        const uint noActivateOrZOrder = 0x0014;
+        const uint noSendChanging = 0x0400;
+        uint flags = noActivateOrZOrder | (checkTrackLimits ? 0 : noSendChanging);
+        if (!SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, flags))
             throw new InvalidOperationException("Could not position the test window");
     }
     [DllImport("user32.dll")]
@@ -190,18 +193,19 @@ function Test-PanelWindow([IntPtr]$Window) {
     $modelsInitial = [PanelSmoke]::Bounds($models)
     $logInitial = [PanelSmoke]::Bounds($log)
 
-    [PanelSmoke]::Position($Window, $initial.Left, $initial.Top, ($initial.Width + 120), ($initial.Height + 100))
-    $grown = [PanelSmoke]::Bounds($Window)
-    $modelsGrown = [PanelSmoke]::Bounds($models)
-    $logGrown = [PanelSmoke]::Bounds($log)
-    if ($grown.Width -le $initial.Width -or $grown.Height -le $initial.Height -or
-        $modelsGrown.Width -le $modelsInitial.Width -or $modelsGrown.Height -le $modelsInitial.Height -or
-        $logGrown.Width -le $logInitial.Width -or $logGrown.Height -le $logInitial.Height) {
-        throw 'Resizing the panel did not expand the model list and log'
+    # Exercise the layout even if the runner's desktop limits interactive enlargement.
+    [PanelSmoke]::Position($Window, $initial.Left, $initial.Top, ($initial.Width + 120), ($initial.Height + 100), $false)
+    $null = Wait-Value 'the model list and log to expand' {
+        $grown = [PanelSmoke]::Bounds($Window)
+        $modelsGrown = [PanelSmoke]::Bounds($models)
+        $logGrown = [PanelSmoke]::Bounds($log)
+        $grown.Width -gt $initial.Width -and $grown.Height -gt $initial.Height -and
+            $modelsGrown.Width -gt $modelsInitial.Width -and $modelsGrown.Height -gt $modelsInitial.Height -and
+            $logGrown.Width -gt $logInitial.Width -and $logGrown.Height -gt $logInitial.Height
     }
 
     $work = [PanelSmoke]::WorkArea($Window)
-    [PanelSmoke]::Position($Window, ($work.Right - 100), ($work.Bottom - 100), ($initial.Width - 120), ($initial.Height - 100))
+    [PanelSmoke]::Position($Window, ($work.Right - 100), ($work.Bottom - 100), ($initial.Width - 120), ($initial.Height - 100), $true)
     $minimum = [PanelSmoke]::Bounds($Window)
     if ($minimum.Width -ne $initial.Width -or $minimum.Height -ne $initial.Height) {
         throw 'The panel did not enforce its initial size as the minimum'
@@ -267,8 +271,6 @@ try {
         if ([PanelSmoke]::Owns($found, [uint32]$panel.Id)) { $found }
     }
 
-    Test-PanelWindow $window
-
     Send-PanelMessage $window 0x0111 1002
     $alert = Wait-Value 'the port-occupied alert' {
         $found = [PanelSmoke]::FindWindow('#32770', 'OCSub2WB')
@@ -299,6 +301,7 @@ try {
     }
 
     [void][PanelSmoke]::ShowWindow($window, 4)
+    Test-PanelWindow $window
     Start-Sleep -Milliseconds 400
     Save-PanelScreenshot $window
     Send-PanelMessage $window 0x0010
