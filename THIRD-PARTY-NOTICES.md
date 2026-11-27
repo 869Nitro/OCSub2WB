@@ -1,10 +1,10 @@
 # 第三方组件与许可
 
-OCSub2WB 项目的代码与文档采用 [MIT](./LICENSE)。本页列出 **v2.1.0 Windows x64 便携包**中由工具链静态链接的运行时代码，以及包内附带的许可文本。
+OCSub2WB 项目的代码与文档采用 [MIT](./LICENSE)。本页列出 **v2.2.1 Windows x64 便携包**中由工具链静态链接的运行时代码，以及包内附带的许可文本。
 
 ## Windows 便携包
 
-v2.1.0 的发布资产来自 Windows GitHub Actions 中通过测试的 MSYS2 MINGW64 构建。下表的版本是此构建实际安装的包版本。[v2.1.0 构建记录](https://github.com/869Nitro/OCSub2WB/actions/runs/45934018054)
+v2.2.1 的发布资产来自 Windows GitHub Actions 中通过测试的 MSYS2 MINGW64 构建。下表的版本是此构建实际安装的包版本。[v2.2.1 构建记录](https://github.com/869Nitro/OCSub2WB/actions/runs/46046637393/job/140667430333)
 
 | 组件 | 构建包版本 | 源码与附带文本 |
 | --- | --- | --- |
