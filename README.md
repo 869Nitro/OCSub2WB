@@ -19,10 +19,10 @@
 ## 运行界面
 
 <p align="center">
-  <img src="./assets/panel.png" width="980" alt="OCSub2WB 发布前实机截图，Hy4 Flash 对话期间的转发记录中同时出现 DeepSeek Flash">
+  <img src="./assets/panel.png" width="980" alt="OCSub2WB v2.2.0 实机截图，最近转发请求显示 DeepSeek Flash 的五位数接收速率">
 </p>
 
-这是 v2.2.0 发布前的实机截图。正式版标题栏会显示 **OCSub2WB v2.2.0**。额度和请求读数来自截图当时。
+这是 **OCSub2WB v2.2.0** 的实机截图，右上角显示近期转发请求的接收速率和 TTFT。图中的五位数读数见下文的工具结果审查案例。
 
 ## 最近完成的转发请求
 
@@ -35,11 +35,13 @@
 
 非流式请求会显示模型 ID，两个流式指标显示 `—`。流式响应缺少必要的用量数据、可计数输出不足两个 token 或首末输出在同一次读取中到达时，`接收 tok/s` 显示 `—`。收到首段输出后仍可显示 TTFT。具体计算和空值条件见[指标说明](https://github.com/869Nitro/OCSub2WB/blob/main/docs/usage.md#最近请求指标)。
 
-### 为什么用 Hy4 对话时会看到 DeepSeek？
+### 为什么对话中会出现 DeepSeek Flash 的高速记录？
 
-这是 **WorkBuddy 5.11.3 的工具结果审查行为**，出现在转发历史中属于正常记录。主对话用 `hy4-flash-free` 时，WorkBuddy 的工具结果审查仍可能从可用模型中另选 `deepseek-v4.1-flash`。如果选中的是已配置的自定义模型，审查请求就会使用该模型的端点，并在经过转发桥时出现在上表。截图中的两种模型 ID 对应不同的转发请求，主对话模型仍按对话中的选择调用。
+这是 **WorkBuddy 5.11.3 的工具结果审查行为**。WorkBuddy 可以为审查单独选择模型。如果选中已配置的自定义 `deepseek-v4.1-flash`，审查就会使用它的端点，经过 OCSub2WB 时会出现在转发历史里。即使对话使用 WorkBuddy 官方模型，审查请求也可能经过转发桥。
 
-审查回复通常很短，流式分块集中到达时，**接收 tok/s** 可能显示很高的数值。该数值按本机接收时间估算，只表示这次响应在转发桥上的到达速率。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
+本机四种对话配置均观察到这一现象：WorkBuddy 官方 Hy4 Flash、官方 DeepSeek Flash、经 OCSub2WB 转发的 DeepSeek Flash，以及经 OCSub2WB 转发的 Hy4 Flash。这是跨模型、跨对话端点复现的行为。具体是否触发审查、选到哪个端点，取决于这一轮的工具调用和 WorkBuddy 当时的模型配置。主对话和审查都用 DeepSeek Flash 时，可以在 WorkBuddy 日志中用 `chat` 和 `content_security_reviewer` 区分。
+
+上图是使用 WorkBuddy 官方 DeepSeek Flash 对话期间的实机案例。日志中经过转发桥的三条记录属于工具结果审查，其中两条的接收速率为 **10,936.9** 和 **22,162.0 tok/s**。这类审查的回复很短，流式分块集中到达时，按首末输出到达间隔估算出的 **接收 tok/s** 会很高。这个读数衡量的是响应到达转发桥的速率，模型内部的生成速度需要上游提供相应计时。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
 
 ## 接下来怎么用
 
