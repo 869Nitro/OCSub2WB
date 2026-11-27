@@ -5,11 +5,19 @@
   <p><a href="https://github.com/869Nitro/OCSub2WB/releases/latest"><strong>下载 Windows x64 便携包</strong></a> · <a href="#快速开始">快速开始</a> · <a href="https://github.com/869Nitro/OCSub2WB/blob/main/docs/usage.md">使用手册</a></p>
 </div>
 
+## OCSub2WB 解决了什么问题？
+
+OCSub2WB 是一个 Windows 本机转发桥。WorkBuddy 把自定义模型请求发到本机，OCSub2WB 再把请求发给 OpenCode Go。配置完成后，你可以继续在 WorkBuddy 里选模型、发消息和使用工具。
+
+OpenCode Go 的对话请求需要携带它能识别的稳定会话标识，供上游优化会话路由和复用提示词缓存。OCSub2WB 优先沿用请求里的 `x-opencode-session`。默认模式下，缺少这个头时，转发桥会尝试用请求里第一条有文本的用户消息生成标识。推导不到时使用预设值，并把标识作为 `x-opencode-session` 发给 OpenCode Go。 [OpenCode 会话标识说明](https://opencode.ai/docs/console/harnesses#sessions)
+
+面板还能批量导入和更新聊天模型，写入模型 ID、上下文与输出上限、工具调用及思考设置，并保留你自行添加的其他模型。你也可以查看订阅用量、探测免费模型、查看近期转发记录，以及为 OpenCode Go 单独设置上游 HTTP 代理。
+
 ## 快速开始
 
 准备 Windows x64、已安装并登录的 WorkBuddy，以及自己的 OpenCode Go API Key。面板可以使用 WorkBuddy 自带的 Python。[OpenCode Go 订阅与 Key](https://opencode.ai/docs/console/go/#how-it-works)
 
-已在 WorkBuddy 5.11.3 上实测 OpenCode Go 转发。Go Plus 和 Go Teams 的兼容性依据上游共用的推理和用量接口判断，尚未用这两个套餐的 Key 实测。使用 Go Teams 时，请填在团队工作区创建的成员个人 API Key。[OpenCode 用量接口](https://opencode.ai/docs/console/go/#usage)
+**实测范围**　已用 WorkBuddy 5.11.3 和 Go 基础档验证转发。Go Plus 和 Go Teams 与基础档共用推理和用量接口，按公开接口判断可沿用相同的接入方式，这两个套餐尚未实测。使用 Go Teams 时，请填在团队工作区创建的成员个人 API Key。 [OpenCode Go 套餐与用量接口](https://opencode.ai/docs/console/go/#usage)
 
 1. 在 GitHub 发布页的 **Assets** 中下载 `OCSub2WB-v2.2.1-win64.zip`，完整解压到可写目录。[v2.2.1 发布页](https://github.com/869Nitro/OCSub2WB/releases/tag/v2.2.1)
 2. 打开 WorkBuddy，再运行 `OCSub2WB.exe`。让 EXE 和包内的两个 `.py` 文件保持在同一目录。
@@ -24,11 +32,11 @@
   <img src="./assets/panel.png" width="980" alt="OCSub2WB v2.2.1 实机截图，最近转发请求表显示 Tok/s、Δt 和 TTFT，下方显示模型探测结果">
 </p>
 
-这是 **OCSub2WB v2.2.1** 的实机截图。右上角显示最近三条转发请求的 Tok/s、Δt 和 TTFT。图中第一条 DeepSeek Flash 请求的接收速率为 **1,325.0 Tok/s**，首尾输出的接收间隔为 **6.8 ms**。
+这是 **OCSub2WB v2.2.1** 的实机截图。右上角显示最近的转发记录，下方模型列表显示上下文、输出上限、思考设置和探测结果。
 
 ## 最近完成的转发请求
 
-面板保留最近 **3 条**成功完成的模型转发请求，最新完成的一条在最上方。同一模型多次请求会各占一行。WorkBuddy 的一轮对话可以发起多次模型调用，经过转发桥的后台调用也会出现在表中。
+面板保留最近 **3 条**成功完成的模型转发请求，按完成时间从新到旧排列。同一模型多次请求会各占一行。
 
 | 指标 | 看什么 |
 | --- | --- |
@@ -38,13 +46,9 @@
 
 非流式请求会显示模型 ID，三个流式指标显示 `—`。流式响应缺少必要的用量数据或可计数输出不足两个 token 时，`Tok/s` 显示 `—`。首末输出在同一次读取中到达时，`Tok/s` 和 `Δt` 都显示 `—`。收到首段输出后仍可显示 TTFT。
 
-### 为什么对话中会出现 DeepSeek Flash 的高速记录？
+### 为什么一轮对话会出现多条记录？
 
-WorkBuddy 5.11.3 的工具结果审查通过开关控制。在本机四组实测中，主对话分别选用 WorkBuddy 官方的 Hy4 Flash、DeepSeek Flash，以及经 OCSub2WB 接入的这两款模型。四组都观察到 DeepSeek Flash 请求经过转发桥。
-
-此前一次以 WorkBuddy 官方 DeepSeek Flash 为主对话模型的测试中，本机日志将三条经 OCSub2WB 转发的请求标记为 `content_security_reviewer`。这个路由结论限于本次验证的版本和模型配置。[WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
-
-此前测试中记录的 **10,936.9** 和 **22,162.0 tok/s** 是流式分块在很短的时间内集中到达时的接收速率。这个指标按分块到达转发桥的时间计算。
+WorkBuddy 的「工具内容注入防护」会检查工具返回的内容。启用后，同一轮任务里除了主对话请求，还可能产生工具结果审查请求。OCSub2WB 按经过转发桥的模型请求逐条记录，因此表中的多条记录可能来自同一轮任务。 [WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
 
 ## 接下来怎么用
 
@@ -57,6 +61,12 @@ WorkBuddy 5.11.3 的工具结果审查通过开关控制。在本机四组实测
 | 查找失败原因 | 点 **打开日志目录**，也可以先看[常见问题](https://github.com/869Nitro/OCSub2WB/blob/main/docs/usage.md#常见问题)。 |
 
 升级、上游代理、备份恢复、配置文件和源码构建的详细步骤见[使用手册](https://github.com/869Nitro/OCSub2WB/blob/main/docs/usage.md)。
+
+## 如果 WorkBuddy 官方支持会话标识，还需要 OCSub2WB 吗？
+
+如果将来 WorkBuddy 的自定义模型请求能提供 OpenCode Go 认可的稳定会话标识，而且你用自己的 API Key 和接口地址实测直连成功，只用一两个常用模型时，可以优先在 WorkBuddy 的自定义模型设置里直连 OpenCode Go。 [OpenCode 直连接入说明](https://opencode.ai/docs/console/harnesses)
+
+如果你经常导入或更换一批模型，想探测免费模型、集中看订阅用量和近期请求，或者需要给 OpenCode Go 单独设代理，仍可使用 OCSub2WB。当前的「一键配置」会把托管模型指向本机转发桥，近期请求表也只记录经过它的请求。
 
 ## 贡献者
 
