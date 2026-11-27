@@ -91,6 +91,10 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $version = $env:GITHUB_REF_NAME
             if ($version -notmatch '^v[0-9][A-Za-z0-9._+-]*$') { throw 'Invalid release tag' }
+            $appVersion = & python -B -c 'from ocgo_common import VERSION; print(VERSION)'
+            if ($LASTEXITCODE -ne 0 -or $version -ne "v$appVersion") {
+              throw 'Release tag does not match the application version'
+            }
           }
           $zip = "OCSub2WB-$version-win64.zip"
           Compress-Archive -LiteralPath $package -DestinationPath $zip
@@ -145,9 +149,17 @@ jobs:
           if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $expected) {
             throw 'Release asset SHA-256 does not match'
           }
-          $draft = gh release view $tag --json isDraft --jq .isDraft 2>$null
+          $release = gh release view $tag --json isDraft,assets 2>$null
           if ($LASTEXITCODE -eq 0) {
-            if ($draft -ne 'true') { throw 'The release is already published' }
+            $releaseInfo = $release | ConvertFrom-Json
+            if (!$releaseInfo.isDraft) {
+              $assets = @($releaseInfo.assets | ForEach-Object { $_.name })
+              if ($zip -notin $assets -or "$zip.sha256" -notin $assets) {
+                throw 'The published release is missing its Windows assets'
+              }
+              Write-Host 'The published release already has its Windows assets'
+              exit 0
+            }
             gh release upload $tag $zip "$zip.sha256" --clobber
           } else {
             gh release create $tag $zip "$zip.sha256" --verify-tag --draft --title $tag --notes-from-tag

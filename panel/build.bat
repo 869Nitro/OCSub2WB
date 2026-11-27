@@ -21,13 +21,17 @@ if not defined WINDRES if exist "D:/dev/mingw64/bin/windres.exe" set "WINDRES=D:
 if not defined GXX goto :notool
 if not defined WINDRES goto :notool
 
+set "APP_VERSION="
+for /f "delims=" %%V in ('python -B -c "import sys; sys.path.insert(0, '..'); from ocgo_common import VERSION; print(VERSION)"') do set "APP_VERSION=%%V"
+if not defined APP_VERSION goto :fail
+
 echo [1/3] resources ...
 "%WINDRES%" -i app.rc -O coff -o app_res.o
 if errorlevel 1 goto :fail
 
 echo [2/3] compile ...
 "%GXX%" -std=c++17 -O2 -s -municode -mwindows -pthread ^
-  -finput-charset=UTF-8 -fexec-charset=UTF-8 ^
+  -finput-charset=UTF-8 -fexec-charset=UTF-8 -DOCSUB2WB_VERSION=L\"%APP_VERSION%\" ^
   ocgo_panel.cpp app_res.o -o ..\OCSub2WB.exe ^
   -lwinhttp -lcomctl32 -lgdi32 -luser32 -lshell32 -lole32 -lws2_32 ^
   -static -static-libgcc -static-libstdc++ -lwinpthread

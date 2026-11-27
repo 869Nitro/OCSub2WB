@@ -25,7 +25,12 @@ if (!(Test-Path -LiteralPath (Join-Path $runtime 'pythonw.exe') -PathType Leaf))
     throw 'The test Python distribution must include pythonw.exe'
 }
 
-# Substitute the public catalog in the child interpreter. The unpacked
+$versionSource = [IO.File]::ReadAllText((Join-Path $package 'ocgo_common.py'))
+$version = [regex]::Match($versionSource, '(?m)^VERSION = "([^"\r\n]+)"').Groups[1].Value
+if (!$version) { throw 'Missing packaged application version' }
+$panelTitle = "OCSub2WB v$version"
+
+# Substitute the catalog and quota responses in the child interpreter. The unpacked
 # application files remain byte-for-byte the ones in the release.
 $fixture = Join-Path $run 'upstream fixture'
 [IO.Directory]::CreateDirectory($fixture) | Out-Null
@@ -35,13 +40,18 @@ import json
 import os
 from pathlib import Path
 
-class CatalogReply:
+class Reply:
     status = 200
+
+    def __init__(self, resource):
+        self.resource = resource
 
     def getheaders(self):
         return [("Content-Type", "application/json")]
 
     def read(self):
+        if self.resource == "usage":
+            return b'{"usage":{"monthly":{"percent":12},"weekly":{"percent":7},"rolling":{"percent":3}}}'
         return json.dumps({"data": [
             {"id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash 1017",
              "type": "chat", "limit": {"context": 1000000, "output": 384000},
@@ -56,13 +66,18 @@ def fixture_connect(self):
 
 
 def fixture_request(self, method, url, body=None, headers=None, *, encode_chunked=False):
-    if (self.host, method, url) != ("opencode.ai", "GET", "/inference/go/v1/models"):
+    if (self.host, method, url) not in (
+        ("opencode.ai", "GET", "/inference/go/v1/models"),
+        ("opencode.ai", "GET", "/inference/go/v1/usage"),
+    ) or (headers or {}).get("Authorization") != "Bearer oc_sk_panel_start_fixture":
         raise OSError("Unexpected request in the packaged panel test")
+    self.fixture_resource = url.rsplit("/", 1)[-1]
 
 
 def fixture_response(self):
-    Path(os.environ["OCSUB2WB_CATALOG_MARKER"]).touch()
-    return CatalogReply()
+    marker = "OCSUB2WB_CATALOG_MARKER" if self.fixture_resource == "models" else "OCSUB2WB_USAGE_MARKER"
+    Path(os.environ[marker]).write_text(f"{os.getpid()}:{os.getppid()}", encoding="ascii")
+    return Reply(self.fixture_resource)
 
 
 http.client.HTTPSConnection.connect = fixture_connect
@@ -71,6 +86,11 @@ http.client.HTTPSConnection.getresponse = fixture_response
 '@
 [IO.File]::WriteAllText((Join-Path $fixture 'sitecustomize.py'), $testUpstream, [Text.UTF8Encoding]::new($false))
 $catalogMarker = Join-Path $run 'catalog-used'
+$usageMarker = Join-Path $run 'usage-used'
+$envPath = Join-Path $package '.env'
+$modelsPath = Join-Path $profile '.workbuddy\models.json'
+$initialModels = '[{"id":"deepseek-v4.1-flash","vendor":"OpenCode","url":"http://127.0.0.1:8787/v1","apiKey":"oc_sk_old_fixture"}]'
+[IO.File]::WriteAllText($modelsPath, $initialModels)
 
 Add-Type -TypeDefinition @"
 using System;
@@ -137,11 +157,17 @@ public static class PanelSmoke {
         uint pid;
         return hwnd != IntPtr.Zero && GetWindowThreadProcessId(hwnd, out pid) != 0 && pid == expected;
     }
-    public static string Status(IntPtr hwnd) {
+    public static string ControlText(IntPtr hwnd, int id) {
         var text = new StringBuilder(1024);
         IntPtr result;
-        SendMessageTimeout(GetDlgItem(hwnd, 1001), 0x000D, (IntPtr)text.Capacity, text, 2, 1000, out result);
+        SendMessageTimeout(GetDlgItem(hwnd, id), 0x000D, (IntPtr)text.Capacity, text, 2, 1000, out result);
         return text.ToString();
+    }
+    public static string Status(IntPtr hwnd) { return ControlText(hwnd, 1001); }
+    public static bool SetKey(IntPtr hwnd, string key) {
+        IntPtr result;
+        return SendTextTimeout(GetDlgItem(hwnd, 1031), 0x000C, IntPtr.Zero, key, 2, 1000, out result)
+            != IntPtr.Zero && result != IntPtr.Zero;
     }
     public static bool ClearLog(IntPtr hwnd) {
         IntPtr result;
@@ -172,6 +198,7 @@ function New-Panel {
     $info.Environment['PYTHONDONTWRITEBYTECODE'] = '1'
     $info.Environment['PYTHONPATH'] = $fixture
     $info.Environment['OCSUB2WB_CATALOG_MARKER'] = $catalogMarker
+    $info.Environment['OCSUB2WB_USAGE_MARKER'] = $usageMarker
     [Diagnostics.Process]::Start($info)
 }
 
@@ -179,6 +206,19 @@ function Send-PanelMessage([IntPtr]$Target, [uint32]$Message, [int]$Parameter = 
     if (![PanelSmoke]::Owns($Target, [uint32]$panel.Id)) { throw 'The test did not own the window' }
     if (![PanelSmoke]::PostMessage($Target, $Message, [IntPtr]$Parameter, [IntPtr]::Zero)) {
         throw 'Could not post a message to the test window'
+    }
+}
+
+function Choose-KeySave([IntPtr]$Window, [string]$Key, [int]$Choice) {
+    if (![PanelSmoke]::SetKey($Window, $Key)) { throw 'Could not set the test API key' }
+    Send-PanelMessage $Window 0x0111 1032
+    $dialog = Wait-Value 'the API key save dialog' {
+        $found = [PanelSmoke]::FindWindow('#32770', '保存 API Key')
+        if ([PanelSmoke]::Owns($found, [uint32]$panel.Id)) { $found }
+    }
+    Send-PanelMessage $dialog 0x0466 $Choice # TDM_CLICK_BUTTON
+    $null = Wait-Value 'the API key save dialog to close' {
+        ![PanelSmoke]::Owns([PanelSmoke]::FindWindow('#32770', '保存 API Key'), [uint32]$panel.Id)
     }
 }
 
@@ -267,7 +307,7 @@ try {
     $panel = New-Panel
     $window = Wait-Value 'the packaged panel window' {
         if ($panel.HasExited) { throw "Panel exited with code $($panel.ExitCode)" }
-        $found = [PanelSmoke]::FindWindow('OpenCodeGoPanel', 'OCSub2WB')
+        $found = [PanelSmoke]::FindWindow('OpenCodeGoPanel', $panelTitle)
         if ([PanelSmoke]::Owns($found, [uint32]$panel.Id)) { $found }
     }
 
@@ -281,23 +321,59 @@ try {
     $null = Wait-Value 'the occupied-port alert to close' {
         ![PanelSmoke]::Owns([PanelSmoke]::FindWindow('#32770', 'OCSub2WB'), [uint32]$panel.Id)
     }
+    Choose-KeySave $window 'oc_sk_panel_cancel_fixture' 2
+    if (Test-Path -LiteralPath $envPath) { throw 'Cancel created a local configuration file' }
+
+    Choose-KeySave $window 'oc_sk_panel_offline_fixture' 201
+    $null = Wait-Value 'the key to be saved locally' { Test-Path -LiteralPath $envPath }
+    if ([IO.File]::ReadAllText($envPath).Trim() -ne 'OPENCODE_API_KEY=oc_sk_panel_offline_fixture') {
+        throw 'The first offline save did not create the expected configuration'
+    }
+    if ([IO.File]::ReadAllText($modelsPath) -ne $initialModels -or
+        (Test-Path -LiteralPath $catalogMarker) -or (Test-Path -LiteralPath $usageMarker) -or
+        (Test-Path -LiteralPath (Join-Path $package 'cache\proxy.pid'))) {
+        throw 'Offline save changed the models, started the relay, or used the upstream'
+    }
+
+    $existing = ('# keep this comment', '  OPENCODE_API_KEY = old', 'OPENCODE_API_KEY=older',
+        'OPENCODE_UPSTREAM_PROXY=off', '') -join [Environment]::NewLine
+    [IO.File]::WriteAllText($envPath, $existing, [Text.UTF8Encoding]::new($true))
+    Choose-KeySave $window 'oc_sk_panel_offline_fixture' 201
+    $null = Wait-Value 'the existing config to be updated offline' {
+        $config = [IO.File]::ReadAllText($envPath)
+        [regex]::Matches($config, '(?m)^OPENCODE_API_KEY=oc_sk_panel_offline_fixture\r?$').Count -eq 2
+    }
+    $saved = [IO.File]::ReadAllText($envPath)
+    if (!$saved.Contains('# keep this comment' + [Environment]::NewLine) -or
+        !$saved.Contains('OPENCODE_UPSTREAM_PROXY=off' + [Environment]::NewLine) -or
+        [IO.File]::ReadAllBytes($envPath)[0] -ne 0xEF) {
+        throw 'Offline save did not preserve the existing configuration'
+    }
     $busy.Stop()
 
-    Send-PanelMessage $window 0x0111 1002
+    Choose-KeySave $window 'oc_sk_panel_start_fixture' 202
     $health = Wait-Value 'the packaged relay on port 8787' {
         $response = Get-Health
         if ($response.ok -and $response.name -eq 'opencode-go-proxy') { $response }
     }
     if ($health.port -ne 8787) { throw 'Wrong relay port' }
-    $child = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($health.pid)"
-    if ($child.ParentProcessId -ne $panel.Id -or !$child.CommandLine.Contains($package)) {
-        throw 'The relay did not belong to the unpacked panel'
+    $pidFile = Join-Path $package 'cache\proxy.pid'
+    if (!(Test-Path -LiteralPath $pidFile) -or [IO.File]::ReadAllText($pidFile).Trim() -ne [string]$health.pid) {
+        throw 'The relay did not use the unpacked package'
     }
     $null = Wait-Value 'the running status in the panel' {
         [PanelSmoke]::Status($window) -match '转发桥(已启动|已在运行|运行中)'
     }
-    $null = Wait-Value 'a response from the simulated catalog' {
-        Test-Path -LiteralPath $catalogMarker
+    $null = Wait-Value 'the list to refresh after the key is saved and validated' {
+        (Test-Path -LiteralPath $catalogMarker) -and (Test-Path -LiteralPath $usageMarker) -and
+            [PanelSmoke]::ControlText($window, 1029) -match '2 可选'
+    }
+    if ([IO.File]::ReadAllText($catalogMarker).Trim() -ne "$($health.pid):$($panel.Id)") {
+        throw 'The relay did not belong to the unpacked panel'
+    }
+    $managed = @(Get-Content -LiteralPath $modelsPath -Raw | ConvertFrom-Json)
+    if ($managed.Count -ne 1 -or $managed[0].apiKey -ne 'oc_sk_panel_start_fixture') {
+        throw 'Save and start did not update the existing managed key'
     }
 
     [void][PanelSmoke]::ShowWindow($window, 4)
@@ -320,7 +396,7 @@ try {
     }
     Send-PanelMessage $confirm 0x0111 6
     if (!$panel.WaitForExit(7000)) { throw 'The panel did not exit' }
-    Write-Host 'PASS window resize, maximize and restore, display-change recovery, occupied port, packaged startup, tray reuse, stop and exit'
+    Write-Host 'PASS key save cancel, offline save, save and start, model refresh, window resize, maximize and restore, display-change recovery, occupied port, tray reuse, stop and exit'
 } finally {
     $busy.Stop()
     if ($duplicate) {
@@ -328,9 +404,14 @@ try {
         $duplicate.Dispose()
     }
     if ($panel) {
-        foreach ($child in Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=$($panel.Id)") {
-            if ($child.Name -eq 'pythonw.exe' -and $child.CommandLine -and $child.CommandLine.Contains($package)) {
-                Stop-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
+        $pidFile = Join-Path $package 'cache\proxy.pid'
+        if (Test-Path -LiteralPath $pidFile) {
+            $relayPid = [IO.File]::ReadAllText($pidFile).Trim() -as [int]
+            if ($relayPid) {
+                $child = Get-Process -Id $relayPid -ErrorAction SilentlyContinue
+                if ($child -and $child.Path -eq (Join-Path $runtime 'pythonw.exe')) {
+                    Stop-Process -InputObject $child -ErrorAction SilentlyContinue
+                }
             }
         }
         if (!$panel.HasExited) { $panel.Kill() }

@@ -601,6 +601,15 @@ class RelayDataPathTest(_RelayTestBase):
                 stream.feed(b'data: {"usage":{"completion_tokens":24}}\n\n', 4.0)
                 self.assertEqual(stream.metrics(0.0), (None, 2.0))
 
+    def test_submillisecond_output_arrivals_keep_the_calculated_rate(self):
+        stream = self.proxy.StreamUsage()
+        stream.feed(b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n', 2.0)
+        stream.feed(b'data: {"choices":[{"delta":{"content":"last"}}]}\n\n', 2.0 + 1 / 8192)
+        usage = {"prompt_tokens": 2341, "completion_tokens": 10,
+                 "completion_tokens_details": {"reasoning_tokens": 0}}
+        stream.feed(b"data: " + json.dumps({"usage": usage}).encode() + b"\n\n", 2.5)
+        self.assertEqual(stream.metrics(0.0), (73728.0, 2.0))
+
     def test_stream_metrics_for_messages_and_responses(self):
         fixtures = [
             ("/v1/messages", [

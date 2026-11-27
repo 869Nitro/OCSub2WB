@@ -1,8 +1,8 @@
 // OCSub2WB.exe - native Win32 control panel for the local OpenCode Go relay.
 //
-// The panel never writes config itself: every action goes through the relay's
-// loopback /api (line protocol, X-OCGO-Token). The relay keeps running when the
-// window closes; only the [退出] button shuts it down.
+// The panel uses the relay's loopback /api (line protocol, X-OCGO-Token) for
+// live changes and can save .env settings locally while the relay is stopped.
+// Closing the window leaves the relay running in the system tray.
 //
 // Build: see build.bat (mingw g++ -municode -mwindows).
 
@@ -103,6 +103,7 @@ enum HttpKind {
     K_MODELS,
     K_LOG,
     K_ACTION,
+    K_KEY,
     K_PROBE_START,
     K_JOB,
     K_SHUTDOWN
@@ -219,14 +220,6 @@ static std::wstring ThinkLabel(const std::string& think) {
     if (think == "always") return L"强制";
     if (think == "toggle") return L"切换";
     return U8ToW(think);
-}
-
-// Panel-only label. Never persist "on-off"/"Fixed": WorkBuddy must keep
-// receiving an empty/list supportedEfforts from models.json.
-static std::wstring EffortsLabel(const ModelRow& m) {
-    if (!m.efforts.empty()) return U8ToW(m.efforts);
-    if (m.think == "toggle") return L"on-off";
-    return L"Fixed";
 }
 
 static std::vector<ModelRow> g_models;
@@ -481,7 +474,7 @@ static bool PortOpen(int port, int timeout_ms = 150) {
 static std::map<std::string, std::string> ReadEnvFile() {
     std::map<std::string, std::string> env;
     std::string raw = FileRead(g_exe_dir + L"\\.env");
-    size_t pos = 0;
+    size_t pos = raw.rfind("\xEF\xBB\xBF", 0) == 0 ? 3 : 0;
     while (pos <= raw.size()) {
         size_t end = raw.find('\n', pos);
         std::string line = Trim(raw.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
@@ -735,6 +728,10 @@ static LaunchState g_launch_state = LAUNCH_NONE;
 static bool g_started_by_panel = false;
 static ULONGLONG g_launch_tick = 0;
 static const ULONGLONG kLaunchGraceMs = 15000;
+
+enum class KeySaveState { Idle, WaitingForRelay, SavingOnline, ApplyingSavedKey };
+static KeySaveState g_key_save_state = KeySaveState::Idle;
+static std::string g_key_after_start;
 
 static bool FileExists(const std::wstring& path) {
     if (path.empty()) return false;
@@ -1034,7 +1031,7 @@ static LRESULT CALLBACK ProxyEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-static constexpr const wchar_t* RECENT_REQUEST_COLUMNS[] = {L"模型 ID", L"tok/s", L"TTFT (s)"};
+static constexpr const wchar_t* RECENT_REQUEST_COLUMNS[] = {L"模型 ID", L"接收 tok/s", L"TTFT (s)"};
 using RecentRequestRow = std::array<std::wstring, 3>;
 static std::vector<RecentRequestRow> g_recent_requests;
 static void ResizeRecentRequestColumns();
@@ -1057,7 +1054,7 @@ static void CreateControls() {
         Mk(L"STATIC", L"-", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS,
            354, y, 230, 16, IDC_Q_INFO1 + i);
     }
-    Mk(L"STATIC", L"最近完成的请求", SS_LEFT | SS_CENTERIMAGE, 600, 43, 250, 17, -1);
+    Mk(L"STATIC", L"最近完成的转发请求", SS_LEFT | SS_CENTERIMAGE, 600, 43, 250, 17, -1);
     HWND recent = Mk(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER,
                      600, 61, 456, 104, IDC_RECENT_REQUESTS, GrowWidth, WS_EX_CLIENTEDGE);
     ListView_SetExtendedListViewStyle(recent, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
@@ -1167,6 +1164,11 @@ static int EffortCount(const std::string& efforts) {
         start = end + 1;
     }
     return count;
+}
+
+// A thinking toggle does not add an effort level. This label is panel-only.
+static std::wstring EffortsLabel(const ModelRow& m) {
+    return EffortCount(m.efforts) > 1 ? U8ToW(m.efforts) : L"Fixed";
 }
 
 static bool SortLess(const ModelRow& a, const ModelRow& b) {
@@ -1926,21 +1928,95 @@ static void DoImportProbe() {
     PostHttp(K_ACTION, L"POST", L"/api/refresh?reset=1", "free=" + ids, 90000);
 }
 
-static void DoSaveKey() {
-    wchar_t buf[512] = {};
-    GetWindowTextW(GetDlgItem(g_hwnd, IDC_KEY), buf, 512);
-    std::string key = Trim(WToU8(buf));
-    if (key.empty()) {
-        MessageBoxW(g_hwnd, L"请先粘贴新的 oc_sk_ 密钥。", L"OCSub2WB", MB_ICONINFORMATION);
-        return;
-    }
-    if (key.find("…") != std::string::npos) {
-        MessageBoxW(g_hwnd, L"这是掩码显示，不是完整密钥。", L"OCSub2WB", MB_ICONINFORMATION);
-        return;
-    }
+static bool WriteEnvValues(const std::vector<std::pair<std::string, std::string>>& values);
+
+static void SetKeySaveState(KeySaveState state) {
+    g_key_save_state = state;
+    EnableWindow(GetDlgItem(g_hwnd, IDC_BTN_KEY), state == KeySaveState::Idle);
+    EnableWindow(GetDlgItem(g_hwnd, IDC_KEY), state == KeySaveState::Idle);
+}
+
+static void SaveKeyOnline(const std::string& key, KeySaveState state) {
+    SetKeySaveState(state);
     SetHintUser(L"正在校验密钥 ...");
-    g_action_sticky = false;
-    PostHttp(K_ACTION, L"POST", L"/api/key", "key=" + key, 40000);
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string form = "key=";
+    for (unsigned char c : key) {
+        // Encode the form value without putting the key in the URL or command line.
+        form += '%';
+        form += hex[c >> 4];
+        form += hex[c & 15];
+    }
+    PostHttp(K_KEY, L"POST", L"/api/key", form, 40000);
+}
+
+static void ReportSavedKeyLaunchFailed() {
+    if (g_key_save_state != KeySaveState::WaitingForRelay) return;
+    g_key_after_start.clear();
+    SetKeySaveState(KeySaveState::Idle);
+    SetHintSticky(L"API Key 已保存到本地 · 转发桥未启动");
+}
+
+static void DoSaveKey() {
+    if (g_key_save_state != KeySaveState::Idle) return;
+    HWND edit = GetDlgItem(g_hwnd, IDC_KEY);
+    int length = GetWindowTextLengthW(edit);
+    std::wstring input(length + 1, L'\0');
+    input.resize(GetWindowTextW(edit, input.data(), length + 1));
+    std::string key = Trim(WToU8(input));
+    if (key.find("…") != std::string::npos) {
+        MessageBoxW(g_hwnd, L"这是掩码显示，不是完整密钥。", L"保存 API Key", MB_ICONINFORMATION);
+        return;
+    }
+    if (key.size() <= 6 || key.rfind("oc_sk_", 0) != 0 ||
+        std::any_of(key.begin(), key.end(), [](unsigned char c) {
+            return c <= ' ' || c >= 127 || c == '"' || c == '\'';
+        })) {
+        MessageBoxW(g_hwnd, L"请粘贴完整的 oc_sk_ API Key。", L"保存 API Key", MB_ICONINFORMATION);
+        return;
+    }
+    if (g_running) {
+        SaveKeyOnline(key, KeySaveState::SavingOnline);
+        return;
+    }
+
+    constexpr int save_only = 201;
+    constexpr int save_and_start = 202;
+    const TASKDIALOG_BUTTON buttons[] = {
+        {save_only, L"仅保存 API Key"},
+        {save_and_start, L"保存并启动转发桥，刷新模型列表"},
+    };
+    TASKDIALOGCONFIG dialog = {};
+    dialog.cbSize = sizeof(dialog);
+    dialog.hwndParent = g_hwnd;
+    dialog.dwFlags = TDF_POSITION_RELATIVE_TO_WINDOW;
+    dialog.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    dialog.pszWindowTitle = L"保存 API Key";
+    dialog.pszMainInstruction = L"选择保存方式";
+    dialog.pszContent = L"仅保存时，API Key 写入本地配置，转发桥保持停止，模型列表保持原样。";
+    dialog.cButtons = ARRAYSIZE(buttons);
+    dialog.pButtons = buttons;
+    dialog.nDefaultButton = save_only;
+    int choice = IDCANCEL;
+    if (FAILED(TaskDialogIndirect(&dialog, &choice, nullptr, nullptr)) || choice == IDCANCEL)
+        return;
+
+    if (!WriteEnvValues({{"OPENCODE_API_KEY", key}})) {
+        MessageBoxW(g_hwnd, L"无法保存 .env，请检查程序目录中配置文件的读写权限。",
+                    L"保存 API Key", MB_ICONWARNING);
+        return;
+    }
+    SetWindowTextW(edit, L"");
+    if (choice == save_only) {
+        SetHintSticky(L"API Key 已保存到本地 · 尚未联网验证");
+        return;
+    }
+
+    g_key_after_start = key;
+    SetKeySaveState(KeySaveState::WaitingForRelay);
+    StartEngine();
+    if (g_launch_state != LAUNCH_STARTING && g_launch_state != LAUNCH_ALREADY)
+        ReportSavedKeyLaunchFailed();
 }
 
 
@@ -1951,15 +2027,17 @@ static void DoSaveKey() {
 static bool RawReadFile(const std::wstring& path, std::string& data) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
     LARGE_INTEGER size = {};
-    if (!GetFileSizeEx(h, &size)) { CloseHandle(h); return false; }
+    if (!GetFileSizeEx(h, &size) || size.QuadPart > 1024 * 1024) {
+        CloseHandle(h);
+        return false;
+    }
     data.resize((size_t)size.QuadPart);
     DWORD read = 0;
     BOOL ok = ReadFile(h, data.data(), (DWORD)data.size(), &read, nullptr);
     CloseHandle(h);
-    data.resize(ok ? read : 0);
-    return ok != FALSE;
+    return ok && read == data.size();
 }
 
 static bool AtomicWriteFile(const std::wstring& path, const std::string& data) {
@@ -1969,7 +2047,7 @@ static bool AtomicWriteFile(const std::wstring& path, const std::string& data) {
     if (h == INVALID_HANDLE_VALUE) return false;
     DWORD written = 0;
     BOOL ok = WriteFile(h, data.data(), (DWORD)data.size(), &written, nullptr);
-    if (ok) FlushFileBuffers(h);
+    if (ok) ok = FlushFileBuffers(h);
     CloseHandle(h);
     if (!ok || written != data.size()) { DeleteFileW(tmp.c_str()); return false; }
     if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
@@ -2004,10 +2082,10 @@ static bool WriteEnvValues(const std::vector<std::pair<std::string, std::string>
     for (const auto& kv : values) {
         bool found = false;
         for (auto& line : lines) {
-            if (line.rfind(kv.first + "=", 0) == 0) {
+            size_t eq = line.find('=');
+            if (eq != std::string::npos && Trim(line.substr(0, eq)) == kv.first) {
                 line = kv.first + "=" + kv.second;
                 found = true;
-                break;
             }
         }
         if (!found) lines.push_back(kv.first + "=" + kv.second);
@@ -2020,10 +2098,6 @@ static bool WriteEnvValues(const std::vector<std::pair<std::string, std::string>
     }
     out += crlf ? "\r\n" : "\n";
     return AtomicWriteFile(path, out);
-}
-
-static bool WriteEnvValue(const std::string& key, const std::string& value) {
-    return WriteEnvValues({ { key, value } });
 }
 
 static bool ParseProxyUrl(std::string url, std::string& host, int& port) {
@@ -2284,6 +2358,7 @@ static void HandleStatus(const Resp* r) {
         } else if (g_launch_state == LAUNCH_ALREADY) {
             g_launch_state = LAUNCH_NONE;
         }
+        ReportSavedKeyLaunchFailed();
         switch (g_launch_state) {
             case LAUNCH_NO_RUNTIME:
                 SetText(IDC_STATUS, L"✕ 未找到 Python 运行时");
@@ -2330,7 +2405,10 @@ static void HandleStatus(const Resp* r) {
     // First successful status after the relay came up: pull the data that
     // failed while it was still starting.
     if (!was_running) {
-        RefreshModelsAsync();
+        if (g_key_save_state == KeySaveState::Idle) {
+            RefreshModelsAsync();
+            RefreshQuotaAsync();
+        }
         RefreshLogAsync();
         if (just_started)
             SetHintAuto(L"转发桥已启动");
@@ -2375,6 +2453,11 @@ static void HandleStatus(const Resp* r) {
     if (g_proxy_dirty) text += L" · 地址未应用";
     SetText(IDC_STATUS, text);
     SetText(IDC_BTN_START, L"停止转发桥");
+
+    if (g_key_save_state == KeySaveState::WaitingForRelay) {
+        SaveKeyOnline(g_key_after_start, KeySaveState::ApplyingSavedKey);
+        g_key_after_start.clear();
+    }
 
     if (models_state == L"recovered" && !g_recovery_prompted) {
         g_recovery_prompted = true;
@@ -2648,6 +2731,35 @@ static void HandleJob(const Resp* r) {
     }
 }
 
+static void HandleKey(const Resp* r) {
+    bool saved_locally = g_key_save_state == KeySaveState::ApplyingSavedKey;
+    SetKeySaveState(KeySaveState::Idle);
+    if (r->status == 200 && r->body.rfind("K ok=1", 0) == 0) {
+        auto kv = ParseKV(r->body);
+        std::string msg = "密钥已更新，改动 " + kv["models"] + " 条";
+        if (!kv["monthly"].empty() && kv["monthly"] != "None")
+            msg += "，月额度 " + kv["monthly"] + "%";
+        SetHintUser(U8ToW(msg));
+        SetText(IDC_KEY, L"");
+        RefreshModelsAsync();
+        if (saved_locally)
+            PostHttp(K_QUOTA, L"GET", L"/api/quota", "", 40000);
+        else
+            RefreshQuotaAsync();
+        RefreshStatusAsync();
+        return;
+    }
+    std::wstring msg = FriendlyError(r->body);
+    if (saved_locally) {
+        SetHintSticky(L"API Key 已保存到本地 · 联机校验或同步失败");
+        RefreshModelsAsync();
+        msg = L"API Key 已保存到本地。\n\n" + msg;
+    } else {
+        SetHintUser(msg);
+    }
+    MessageBoxW(g_hwnd, msg.c_str(), L"保存 API Key", MB_ICONWARNING);
+}
+
 static void HandleAction(const Resp* r) {
     bool sticky = g_action_sticky;
     g_action_sticky = false;
@@ -2689,14 +2801,7 @@ static void HandleAction(const Resp* r) {
         RefreshStatusAsync();
         return;
     }
-    if (r->body.rfind("K ", 0) == 0) {
-        auto kv = ParseKV(r->body);
-        std::string msg = "密钥已更新，改动 " + kv["models"] + " 条，月额度 " + kv["monthly"] + "%";
-        notify(U8ToW(msg));
-        SetWindowTextW(GetDlgItem(g_hwnd, IDC_KEY), L"");
-        RefreshModelsAsync();
-        RefreshQuotaAsync();
-    } else if (r->body.rfind("R ", 0) == 0) {
+    if (r->body.rfind("R ", 0) == 0) {
         auto kv = ParseKV(r->body);
         std::string msg = "重装完成：写入 " + kv["written"] + " 条，保留 " + kv["kept"] +
                           " 条自有，共 " + kv["rows"] + " 条";
@@ -2743,6 +2848,7 @@ static void OnHttp(WPARAM kind, Resp* r) {
         case K_PROBE_START: HandleProbeStart(r); break;
         case K_JOB: HandleJob(r); break;
         case K_ACTION: HandleAction(r); break;
+        case K_KEY: HandleKey(r); break;
         default: break;
     }
     delete r;
@@ -2978,9 +3084,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             TrayAdd();
             RefreshStatusAsync();
-            RefreshModelsAsync();
-            RefreshQuotaAsync();
-            RefreshLogAsync();
             return 0;
 
         case WM_GETMINMAXINFO: {
@@ -3024,7 +3127,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == 2) RefreshLogAsync();
             else if (wp == 3 && !g_job_id.empty())
                 PostHttp(K_JOB, L"GET", L"/api/job/" + U8ToW(g_job_id), "", 4000);
-            else if (wp == 4) RefreshQuotaAsync();
+            else if (wp == 4 && g_running && g_key_save_state == KeySaveState::Idle)
+                RefreshQuotaAsync();
             else if (wp == 5) UpdateRefreshTip();
             return 0;
 
@@ -3234,8 +3338,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     }
 
     const SIZE minimum = MinimumWindowSize();
+    const wchar_t title[] = L"OCSub2WB v" OCSUB2WB_VERSION;
     HWND hwnd = CreateWindowExW(
-        0, L"OpenCodeGoPanel", L"OCSub2WB", PANEL_STYLE,
+        0, L"OpenCodeGoPanel", title, PANEL_STYLE,
         CW_USEDEFAULT, CW_USEDEFAULT, minimum.cx, minimum.cy,
         nullptr, nullptr, inst, nullptr);
     if (!hwnd) return 1;

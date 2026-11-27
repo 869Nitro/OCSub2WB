@@ -311,6 +311,7 @@ class StreamUsage:
         ttft = self.first_output - started
         duration = self.last_output - self.first_output
         count = output_tokens(self.usage, self.saw_reasoning, self.saw_tools)
+        # The timestamps measure arrival at the relay socket, including buffered bursts.
         rate = (count - 1) / duration if count is not None and count > 1 and duration > 0 else None
         return rate, ttft
 
