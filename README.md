@@ -50,6 +50,8 @@ OpenCode Go 的对话请求需要携带它能识别的稳定会话标识，供�
 
 WorkBuddy 的「工具内容注入防护」会检查工具返回的内容。启用后，同一轮任务里除了主对话请求，还可能产生工具结果审查请求。OCSub2WB 按经过转发桥的模型请求逐条记录，因此表中的多条记录可能来自同一轮任务。 [WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
 
+工具结果审查的回复可能很短。如果首尾输出分块集中到达，`Δt` 可能只有几毫秒，按这段间隔计算的 `Tok/s` 就会很高。看到 DeepSeek Flash 等模型的高读数时，可以先看旁边的 `Δt`。这里显示的是转发桥收到输出的速率。
+
 ## 接下来怎么用
 
 | 需要 | 操作 |
