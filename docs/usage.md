@@ -52,6 +52,8 @@ Get-FileHash -Algorithm SHA256 .\OCSub2WB-v2.2.0-win64.zip
 
 若上游给出了思考用量明细，转发桥据此扣除思考 token。已观察到思考但上游未给出可分开的用量时，速率显示 `—`。缺少用量、可计数输出不足两个 token 或首末输出在同一次读取中到达时也会显示 `—`，只要有可识别的流式输出，TTFT 仍可显示。非流式请求的两项流式指标都显示 `—`。[OpenCode 用量字段](https://opencode.ai/docs/console/api/inference/#cost)
 
+WorkBuddy 的「工具内容注入防护」会检查工具返回的内容。启用后，同一轮任务里除了主对话请求，还可能产生工具结果审查请求。OCSub2WB 按经过转发桥的模型请求逐条记录，因此表中的多条记录可能来自同一轮任务。 [WorkBuddy 安全中心说明](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Permission-Modes#ai-安全防护)
+
 ## 上游代理
 
 上游代理设置控制转发桥**访问 OpenCode Go**时的网络路径。填写代理程序实际监听的 **HTTP** 地址，例如 `http://127.0.0.1:7897`，选择模式后点 **应用**。
@@ -86,7 +88,7 @@ Get-FileHash -Algorithm SHA256 .\OCSub2WB-v2.2.0-win64.zip
 | 便携目录的 `cache/backup/` | 写入模型配置前的备份。 |
 | 便携目录的 `cache/api.token`、`cache/proxy.pid` | 本机面板控制令牌以及转发桥进程信息。 |
 
-Key 以明文保存在 `.env` 和写入 WorkBuddy 的托管模型条目中。模型备份也可能包含 Key。分享日志或配置前，先检查其中的 Key、控制令牌和本机信息。
+Key 以**明文**保存在 `.env` 和 WorkBuddy 的托管模型配置中，备份也可能包含 Key。公开反馈问题时，请先从日志、配置和截图中移除 Key、控制令牌、会话标识和其他本机信息。
 
 转发桥监听本机回环地址。模型请求和认证信息由转发桥发往 OpenCode Go，并在启用上游代理时走选定的路径。上游的数据处理规则见[OpenCode Go 隐私说明](https://opencode.ai/docs/console/go/#privacy)。
 
