@@ -305,15 +305,15 @@ class StreamUsage:
             self._skip_line = self._skip_event = True
             self._data.clear()
 
-    def metrics(self, started: float) -> tuple[float | None, float | None]:
+    def metrics(self, started: float) -> tuple[float | None, float | None, float | None]:
         if self.first_output is None:
-            return None, None
+            return None, None, None
         ttft = self.first_output - started
         duration = self.last_output - self.first_output
         count = output_tokens(self.usage, self.saw_reasoning, self.saw_tools)
         # The timestamps measure arrival at the relay socket, including buffered bursts.
         rate = (count - 1) / duration if count is not None and count > 1 and duration > 0 else None
-        return rate, ttft
+        return rate, ttft, duration if duration > 0 else None
 
     def _output(self, value: object, received: float) -> None:
         if isinstance(value, str) and value:
@@ -470,7 +470,7 @@ class Config:
     jobs: dict[str, dict] = {}
     job_seq = 0
     quota_cache: tuple[float, dict] | None = None
-    recent_responses: tuple[tuple[float, str, float | None, float | None], ...] = ()
+    recent_responses: tuple[tuple[float, str, float | None, float | None, float | None], ...] = ()
 
 
 def _prune_jobs_locked(keep: int = 20) -> None:
@@ -675,7 +675,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                     if not response.get("error") and response.get("status") not in (
                         "failed", "incomplete", "cancelled"
                     ):
-                        self._record_response(model, None, None)
+                        self._record_response(model, None, None, None)
 
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             Config.log.write(f"{method} {raw_path} client_abort after {status}")
@@ -719,10 +719,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         ).encode("utf-8")
 
     @staticmethod
-    def _record_response(model: str, rate: float | None, ttft: float | None) -> None:
+    def _record_response(model: str, rate: float | None, ttft: float | None,
+                         duration: float | None) -> None:
         finished = time.perf_counter()
         with Config.lock:
-            samples = [(finished, model, rate, ttft), *Config.recent_responses]
+            samples = [(finished, model, rate, ttft, duration), *Config.recent_responses]
             samples.sort(key=lambda sample: sample[0], reverse=True)
             Config.recent_responses = tuple(samples[:3])
 
@@ -949,13 +950,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                 token_masked = oc.mask_key(Config.fallback_key)
                 recent = Config.recent_responses
             recent_fields = []
-            for index, (_, model, rate, ttft) in enumerate(recent, start=1):
+            for index, (_, model, rate, ttft, duration) in enumerate(recent, start=1):
                 prefix = "latest" if index == 1 else f"recent_{index}"
                 recent_fields.append(f"{prefix}_model={model}")
                 rate_text = f"{rate:.1f}" if rate is not None else ""
                 recent_fields.append(f"{prefix}_tok_s={rate_text}")
                 ttft_text = f"{ttft:.3f}" if ttft is not None else ""
                 recent_fields.append(f"{prefix}_ttft_s={ttft_text}")
+                duration_text = str(duration) if duration is not None else ""
+                recent_fields.append(f"{prefix}_receive_s={duration_text}")
             count = oc.managed_count()
             models_state = "recovered" if oc.models_load_state()["recovered"] else "ok"
             self._text(200, " ".join([
@@ -971,7 +974,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 f"models={count}",
                 f"models_state={models_state}",
                 f"requests={Config.requests_total}",
-                *(recent_fields or ["latest_model=", "latest_tok_s=", "latest_ttft_s="]),
+                *(recent_fields or ["latest_model=", "latest_tok_s=", "latest_ttft_s=", "latest_receive_s="]),
                 f"uptime={int(time.time() - Config.started_at)}",
             ]))
             return

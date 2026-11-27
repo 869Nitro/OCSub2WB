@@ -351,6 +351,8 @@ try {
     }
     $busy.Stop()
 
+    # Exercise save and start with no configuration left by the offline tests.
+    Remove-Item -LiteralPath $envPath
     Choose-KeySave $window 'oc_sk_panel_start_fixture' 202
     $health = Wait-Value 'the packaged relay on port 8787' {
         $response = Get-Health
@@ -367,6 +369,11 @@ try {
     $null = Wait-Value 'the list to refresh after the key is saved and validated' {
         (Test-Path -LiteralPath $catalogMarker) -and (Test-Path -LiteralPath $usageMarker) -and
             [PanelSmoke]::ControlText($window, 1029) -match '2 可选'
+    }
+    $null = Wait-Value 'all three usage windows to refresh automatically' {
+        [PanelSmoke]::ControlText($window, 1017) -match '^3%' -and
+            [PanelSmoke]::ControlText($window, 1018) -match '^7%' -and
+            [PanelSmoke]::ControlText($window, 1019) -match '^12%'
     }
     if ([IO.File]::ReadAllText($catalogMarker).Trim() -ne "$($health.pid):$($panel.Id)") {
         throw 'The relay did not belong to the unpacked panel'
@@ -396,7 +403,7 @@ try {
     }
     Send-PanelMessage $confirm 0x0111 6
     if (!$panel.WaitForExit(7000)) { throw 'The panel did not exit' }
-    Write-Host 'PASS key save cancel, offline save, save and start, model refresh, window resize, maximize and restore, display-change recovery, occupied port, tray reuse, stop and exit'
+    Write-Host 'PASS key save cancel, offline save, save and start, model and usage refresh, window resize, maximize and restore, display-change recovery, occupied port, tray reuse, stop and exit'
 } finally {
     $busy.Stop()
     if ($duplicate) {

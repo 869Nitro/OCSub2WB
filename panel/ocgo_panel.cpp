@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -79,6 +80,7 @@ enum {
     IDC_RADIO_MANUAL = 1043,
     IDC_PROXY_URL = 1044,
     IDC_BTN_PROXY = 1045,
+    IDC_PROXY_HINT = 1046,
 
     IDC_MODEL_GROUP = 1029,
     IDC_LOG = 1051
@@ -1031,9 +1033,13 @@ static LRESULT CALLBACK ProxyEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-static constexpr const wchar_t* RECENT_REQUEST_COLUMNS[] = {L"模型 ID", L"接收 tok/s", L"TTFT (s)"};
-using RecentRequestRow = std::array<std::wstring, 3>;
+static constexpr std::array<const wchar_t*, 4> RECENT_REQUEST_COLUMNS = {
+    L"模型 ID", L"Tok/s", L"Δt", L"TTFT (s)"
+};
+static constexpr int RECENT_DURATION_COLUMN = 2;
+using RecentRequestRow = std::array<std::wstring, RECENT_REQUEST_COLUMNS.size()>;
 static std::vector<RecentRequestRow> g_recent_requests;
+static HWND g_recent_tip = nullptr;
 static void ResizeRecentRequestColumns();
 
 static void CreateControls() {
@@ -1061,13 +1067,26 @@ static void CreateControls() {
     LVCOLUMNW recent_column = {};
     recent_column.mask = LVCF_TEXT | LVCF_FMT;
     recent_column.fmt = LVCFMT_LEFT;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < static_cast<int>(RECENT_REQUEST_COLUMNS.size()); ++i) {
         recent_column.pszText = const_cast<wchar_t*>(RECENT_REQUEST_COLUMNS[i]);
         ListView_InsertColumn(recent, i, &recent_column);
     }
     HWND recent_header = ListView_GetHeader(recent);
     SetWindowLongPtrW(recent_header, GWL_STYLE,
                       GetWindowLongPtrW(recent_header, GWL_STYLE) | HDS_NOSIZING);
+    g_recent_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                   WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                   0, 0, 0, 0, recent_header, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (g_recent_tip) {
+        TOOLINFOW tip = {};
+        tip.cbSize = sizeof(tip);
+        tip.uFlags = TTF_SUBCLASS;
+        tip.hwnd = recent_header;
+        tip.uId = RECENT_DURATION_COLUMN;
+        tip.lpszText = const_cast<wchar_t*>(L"首段到末段输出的接收间隔，用于计算旁边的 Tok/s。");
+        SendMessageW(g_recent_tip, TTM_ADDTOOLW, 0, (LPARAM)&tip);
+        SendMessageW(g_recent_tip, TTM_SETMAXTIPWIDTH, 0, 420);
+    }
     ResizeRecentRequestColumns();
 
     Mk(L"BUTTON", L"模型", BS_GROUPBOX, 12, 176, 1056, 250, IDC_MODEL_GROUP, GrowWidth | GrowModelHeight);
@@ -1076,7 +1095,7 @@ static void CreateControls() {
     ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
     SetWindowSubclass(lv, ModelsSubclass, 1, 0);
     struct { const wchar_t* name; int width; } cols[] = {
-        { L"模型 id", 176 }, { L"名称", 200 }, { L"上下文", 88 }, { L"输出", 88 },
+        { L"模型 ID", 176 }, { L"名称", 200 }, { L"上下文", 88 }, { L"输出", 88 },
         { L"思考", 64 }, { L"档位", 110 }, { L"规则", 142 }, { L"探测", 140 }
     };
     for (int i = 0; i < 8; ++i) {
@@ -1111,6 +1130,7 @@ static void CreateControls() {
     SendMessageW(url, EM_SETLIMITTEXT, 128, 0);
     SetWindowSubclass(url, ProxyEditSubclass, 2, 0);
     Mk(L"BUTTON", L"应用", BS_PUSHBUTTON, 884, 436, 64, 24, IDC_BTN_PROXY, MoveBelowModels);
+    Mk(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, 956, 436, 100, 24, IDC_PROXY_HINT, MoveBelowModels);
 
     Mk(L"BUTTON", L"日志", BS_GROUPBOX, 12, 470, 1056, 266, -1, GrowWidth | MoveBelowModels | GrowLogHeight);
     HWND log = Mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER,
@@ -1466,7 +1486,7 @@ static LRESULT CALLBACK ModelsSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
 static void UpdateSortHeader() {
     static const wchar_t* kBase[8] = {
-        L"模型 id", L"名称", L"上下文", L"输出", L"思考", L"档位", L"规则", L"探测"
+        L"模型 ID", L"名称", L"上下文", L"输出", L"思考", L"档位", L"规则", L"探测"
     };
     HWND lv = GetDlgItem(g_hwnd, IDC_MODELS);
     if (!lv) return;
@@ -1498,8 +1518,9 @@ static int MeasureTextWidth(HDC dc, HFONT font, const std::wstring& text) {
 
 static void ResizeRecentRequestColumns() {
     HWND list = GetDlgItem(g_hwnd, IDC_RECENT_REQUESTS);
+    constexpr int column_count = static_cast<int>(RECENT_REQUEST_COLUMNS.size());
     RECT client = {};
-    if (!GetClientRect(list, &client) || client.right < 5) return;
+    if (!GetClientRect(list, &client) || client.right < column_count + 2) return;
     HDC dc = GetDC(list);
     if (!dc) return;
 
@@ -1509,24 +1530,37 @@ static void ResizeRecentRequestColumns() {
     if (!cell_font) cell_font = g_font;
     if (!header_font) header_font = cell_font;
 
-    std::array<int, 3> needs = {};
-    for (int i = 0; i < 3; ++i)
+    std::array<int, column_count> needs = {};
+    for (int i = 0; i < column_count; ++i)
         needs[i] = MeasureTextWidth(dc, header_font, RECENT_REQUEST_COLUMNS[i]);
     needs[1] = std::max(needs[1], MeasureTextWidth(dc, cell_font, L"9999.9"));
     for (const auto& row : g_recent_requests) {
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < column_count; ++i)
             needs[i] = std::max(needs[i], MeasureTextWidth(dc, cell_font, row[i]));
     }
     const int padding = MulDiv(16, std::max(96, GetDeviceCaps(dc, LOGPIXELSX)), 96);
     ReleaseDC(list, dc);
 
     const int available = static_cast<int>(client.right) - 2;
-    const int spare = std::max(0, available - needs[0] - needs[1] - needs[2] - 3 * padding);
-    const int rate_width = std::min(available - 2, needs[1] + padding + spare / 3);
-    const int ttft_width = std::min(available - rate_width - 1, needs[2] + padding + spare / 3);
-    ListView_SetColumnWidth(list, 0, available - rate_width - ttft_width);
-    ListView_SetColumnWidth(list, 1, rate_width);
-    ListView_SetColumnWidth(list, 2, ttft_width);
+    int required = column_count * padding;
+    for (int width : needs) required += width;
+    const int spare_per_column = std::max(0, available - required) / column_count;
+    int remaining = available;
+    for (int i = 1; i < column_count; ++i) {
+        const int width = std::min(remaining - (column_count - i),
+                                   needs[i] + padding + spare_per_column);
+        ListView_SetColumnWidth(list, i, width);
+        remaining -= width;
+    }
+    ListView_SetColumnWidth(list, 0, remaining);
+    if (g_recent_tip) {
+        TOOLINFOW tip = {};
+        tip.cbSize = sizeof(tip);
+        tip.hwnd = header;
+        tip.uId = RECENT_DURATION_COLUMN;
+        if (Header_GetItemRect(header, RECENT_DURATION_COLUMN, &tip.rect))
+            SendMessageW(g_recent_tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tip);
+    }
 }
 
 static void AutoSizeColumns() {
@@ -1536,7 +1570,7 @@ static void AutoSizeColumns() {
     if (!hdr) return;
 
     static const wchar_t* kBase[8] = {
-        L"模型 id", L"名称", L"上下文", L"输出", L"思考", L"档位", L"规则", L"探测"
+        L"模型 ID", L"名称", L"上下文", L"输出", L"思考", L"档位", L"规则", L"探测"
     };
     HDC dc = GetDC(lv);
     if (!dc) return;
@@ -2205,11 +2239,16 @@ static void ClearUrlError() {
     if (edit) InvalidateRect(edit, nullptr, TRUE);
 }
 
+static void SetProxyDirty(bool dirty) {
+    g_proxy_dirty = dirty;
+    SetText(IDC_PROXY_HINT, dirty ? L"地址未应用" : L"");
+}
+
 static void HandleProxyCheck(ProxyCheckResult* result) {
     if (result->ok) {
         if (WriteEnvValues({ { "OPENCODE_UPSTREAM_PROXY", result->mode },
                              { "OPENCODE_UPSTREAM_PROXY_URL", result->url } })) {
-            g_proxy_dirty = false;
+            SetProxyDirty(false);
             g_proxy_applied = result->mode;
             g_proxy_mode = U8ToW(result->mode);
             g_proxy_url_synced = U8ToW(result->url);
@@ -2238,7 +2277,7 @@ static void ApplyProxyMode(const std::string& mode, const std::string& url) {
                      "mode=off&url=" + url, 20000);
         } else if (WriteEnvValues({ { "OPENCODE_UPSTREAM_PROXY", "off" },
                                      { "OPENCODE_UPSTREAM_PROXY_URL", url } })) {
-            g_proxy_dirty = false;
+            SetProxyDirty(false);
             g_proxy_applied = "off";
             g_proxy_mode = L"off";
             if (!url.empty()) g_proxy_url_current = U8ToW(url);
@@ -2275,22 +2314,21 @@ static void ApplyProxyMode(const std::string& mode, const std::string& url) {
 
 static void OnProxyRadio(int id) {
     if (id == IDC_RADIO_MANUAL) {
-        g_proxy_dirty = true;
+        SetProxyDirty(true);
         EnableWindow(GetDlgItem(g_hwnd, IDC_PROXY_URL), TRUE);
         SetFocus(GetDlgItem(g_hwnd, IDC_PROXY_URL));
-        SetHintUser(L"修改地址后点「应用」");
         return;
     }
     if (id == IDC_RADIO_OFF) {
         EnableWindow(GetDlgItem(g_hwnd, IDC_PROXY_URL), FALSE);
         if (!g_proxy_dirty && g_proxy_applied == "off") return;
-        g_proxy_dirty = false;
+        SetProxyDirty(false);
         ApplyProxyMode("off", ProxyUrlText());
         return;
     }
     EnableWindow(GetDlgItem(g_hwnd, IDC_PROXY_URL), TRUE);
     if (!g_proxy_dirty && g_proxy_applied == "auto") return;
-    g_proxy_dirty = true;
+    SetProxyDirty(true);
     SetHintUser(L"自动：仅锁区模型走此代理");
     ApplyProxyMode("auto", ProxyUrlText());
 }
@@ -2307,7 +2345,7 @@ static void DoApplyProxy() {
         ShowUrlError(L"请填写代理地址，例如 http://127.0.0.1:7897");
         return;
     }
-    if (mode != "off") g_proxy_dirty = true;
+    if (mode != "off") SetProxyDirty(true);
     ApplyProxyMode(mode, url);
 }
 
@@ -2319,15 +2357,15 @@ static void SetRecentRequests(const std::vector<RecentRequestRow>& rows) {
     SendMessageW(list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(list);
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-        const auto& [model, rate, ttft] = rows[i];
+        const auto& row = rows[i];
         LVITEMW item = {};
         item.mask = LVIF_TEXT;
         item.iItem = i;
-        item.pszText = const_cast<wchar_t*>(model.c_str());
+        item.pszText = const_cast<wchar_t*>(row[0].c_str());
         int inserted = ListView_InsertItem(list, &item);
         if (inserted >= 0) {
-            ListView_SetItemText(list, inserted, 1, const_cast<wchar_t*>(rate.c_str()));
-            ListView_SetItemText(list, inserted, 2, const_cast<wchar_t*>(ttft.c_str()));
+            for (int column = 1; column < static_cast<int>(row.size()); ++column)
+                ListView_SetItemText(list, inserted, column, const_cast<wchar_t*>(row[column].c_str()));
         }
     }
     ResizeRecentRequestColumns();
@@ -2335,10 +2373,24 @@ static void SetRecentRequests(const std::vector<RecentRequestRow>& rows) {
     InvalidateRect(list, nullptr, TRUE);
 }
 
+static std::wstring FormatReceiveDuration(const std::string& value) {
+    char* end = nullptr;
+    const double seconds = std::strtod(value.c_str(), &end);
+    if (*end || !std::isfinite(seconds) || seconds <= 0) return L"—";
+    if (seconds < 0.0001) return L"<0.1 ms";
+    wchar_t text[32] = {};
+    if (seconds < 0.1) {
+        std::swprintf(text, ARRAYSIZE(text), L"%.1f ms", seconds * 1000);
+    } else {
+        std::swprintf(text, ARRAYSIZE(text), L"%.2f s", seconds);
+    }
+    return text;
+}
+
 static void HandleStatus(const Resp* r) {
     g_status_busy = false;
     if (r->status != 200 || r->body.rfind("S ", 0) != 0) {
-        SetRecentRequests({{L"等待转发桥", L"—", L"—"}});
+        SetRecentRequests({{L"等待转发桥", L"—", L"—", L"—"}});
         g_running = false;
         // Keep "started by this panel" across the first polls while the
         // engine is still booting; a later failure clears it.
@@ -2393,11 +2445,13 @@ static void HandleStatus(const Resp* r) {
             if (model.empty()) break;
             const auto rate = U8ToW(kv[prefix + "_tok_s"]);
             const auto ttft = U8ToW(kv[prefix + "_ttft_s"]);
-            recent.push_back({model, rate.empty() ? L"—" : rate, ttft.empty() ? L"—" : ttft});
+            recent.push_back({model, rate.empty() ? L"—" : rate,
+                              FormatReceiveDuration(kv[prefix + "_receive_s"]),
+                              ttft.empty() ? L"—" : ttft});
         }
     }
     if (recent.empty()) {
-        recent.push_back({supports_timing ? L"等待模型请求" : L"请重启至新版转发桥", L"—", L"—"});
+        recent.push_back({supports_timing ? L"等待模型请求" : L"请重启至新版转发桥", L"—", L"—", L"—"});
     }
     SetRecentRequests(recent);
     SetRelayOnly(true);
@@ -2450,7 +2504,6 @@ static void HandleStatus(const Resp* r) {
                         L" · 上游 " + route +
                         L" · " + models + L" 个模型 · pid " + pid;
     if (models_state == L"recovered") text += L" · models.json 已回退备份";
-    if (g_proxy_dirty) text += L" · 地址未应用";
     SetText(IDC_STATUS, text);
     SetText(IDC_BTN_START, L"停止转发桥");
 
@@ -2531,7 +2584,8 @@ static void ShowQuotaError(const std::wstring& message) {
 }
 
 static void HandleQuota(const Resp* r) {
-    if (r->status == 200 && r->body.rfind("R ", 0) == 0) {
+    if (r->status == 200 &&
+        (r->body.rfind("Q ok=1\nR ", 0) == 0 || r->body.rfind("R ", 0) == 0)) {
         RenderQuota(r->body);
     } else {
         ShowQuotaError(L"额度读取失败");
@@ -2823,7 +2877,7 @@ static void HandleAction(const Resp* r) {
         RefreshModelsAsync();
     } else if (r->body.rfind("U ", 0) == 0) {
         auto kv = ParseKV(r->body);
-        g_proxy_dirty = false;
+        SetProxyDirty(false);
         g_proxy_pending = false;
         ClearUrlError();
         g_proxy_applied = kv["mode"];
@@ -3221,7 +3275,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 wchar_t buf[512] = {};
                 GetWindowTextW(GetDlgItem(g_hwnd, IDC_PROXY_URL), buf, 512);
                 if (std::wstring(buf) == g_proxy_url_synced) return 0;
-                g_proxy_dirty = true;
+                SetProxyDirty(true);
                 return 0;
             }
             switch (id) {
@@ -3286,6 +3340,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(hwnd, 4);
             KillTimer(hwnd, 5);
             if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
+            if (g_recent_tip) { DestroyWindow(g_recent_tip); g_recent_tip = nullptr; }
             PostQuitMessage(0);
             return 0;
     }

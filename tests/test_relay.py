@@ -482,20 +482,21 @@ class RelayDataPathTest(_RelayTestBase):
             "GET", "/api/status", headers={"X-OCGO-Token": API_TOKEN})
         self.assertEqual(status, 200)
         fields = dict(field.split("=", 1) for field in body.decode().split() if "=" in field)
-        return [(fields[f"{prefix}_model"], fields[f"{prefix}_tok_s"], fields[f"{prefix}_ttft_s"])
+        return [(fields[f"{prefix}_model"], fields[f"{prefix}_tok_s"],
+                 fields[f"{prefix}_ttft_s"], fields[f"{prefix}_receive_s"])
                 for prefix in ("latest", "recent_2", "recent_3")
                 if fields.get(f"{prefix}_model")]
 
     def _latest(self):
         recent = self._recent()
-        return recent[0] if recent else ("", "", "")
+        return recent[0] if recent else ("", "", "", "")
 
     def _wait_latest(self, model):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            actual, rate, ttft = self._latest()
+            actual, rate, ttft, duration = self._latest()
             if actual == model:
-                return rate, ttft
+                return rate, ttft, duration
             time.sleep(0.01)
         self.fail(f"latest completed model did not become {model!r}")
 
@@ -506,7 +507,7 @@ class RelayDataPathTest(_RelayTestBase):
         chunks[-1:-1] = usage
         upstream = self._start_upstream(modes=["sse", "sse"], sse_chunks=chunks)
         self._serve(upstream)
-        self.assertEqual(self._latest(), ("", "", ""))
+        self.assertEqual(self._latest(), ("", "", "", ""))
 
         request = {"model": MODEL, "messages": [], "stream": True,
                    "stream_options": {"include_obfuscation": False}}
@@ -515,9 +516,11 @@ class RelayDataPathTest(_RelayTestBase):
         expected = {**request, "stream_options": {"include_obfuscation": False,
                                                   "include_usage": True}}
         self.assertEqual(json.loads(upstream.requests[0]["body"]), expected)
-        rate, ttft = self._wait_latest(MODEL)
+        rate, ttft, duration = self._wait_latest(MODEL)
         self.assertGreater(float(rate), 0.0)
         self.assertGreaterEqual(float(ttft), 0.0)
+        self.assertGreater(float(duration), 0.0)
+        self.assertAlmostEqual(float(rate), 23 / float(duration), delta=0.051)
 
         request["model"] = "explicit-options"
         request["stream_options"]["include_usage"] = False
@@ -530,13 +533,13 @@ class RelayDataPathTest(_RelayTestBase):
         upstream = self._start_upstream(modes=["sse", "429", "json", "sse"])
         self._serve(upstream)
         self._post_chat({"model": "no-usage", "stream": True})
-        rate, ttft = self._wait_latest("no-usage")
+        rate, ttft, duration = self._wait_latest("no-usage")
         self.assertEqual(rate, "")
         self.assertGreaterEqual(float(ttft), 0.0)
         self._post_chat({"model": "failed"})
         self._post_chat({"model": "selftest"}, {"X-OCGO-Selftest": "1"})
         self._post_chat({"model": "selftest", "stream": True}, {"X-OCGO-Selftest": "1"})
-        self.assertEqual(self._latest(), ("no-usage", "", ttft))
+        self.assertEqual(self._latest(), ("no-usage", "", ttft, duration))
         self.assertNotIn("x-ocgo-selftest", upstream.requests[2]["headers"])
         self.assertNotIn("stream_options", json.loads(upstream.requests[3]["body"]))
 
@@ -551,12 +554,12 @@ class RelayDataPathTest(_RelayTestBase):
             try:
                 self.assertTrue(upstream.delayed_started.wait(2))
                 self.assertEqual(self._post_chat({"model": "second-started"})[0], 200)
-                self.assertEqual(self._wait_latest("second-started"), ("", ""))
+                self.assertEqual(self._wait_latest("second-started"), ("", "", ""))
             finally:
                 upstream.release_delayed.set()
             self.assertEqual(first.result()[0], 200)
-        self.assertEqual(self._wait_latest("first-started"), ("", ""))
-        self.assertEqual([model for model, _, _ in self._recent()],
+        self.assertEqual(self._wait_latest("first-started"), ("", "", ""))
+        self.assertEqual([model for model, *_ in self._recent()],
                          ["first-started", "second-started"])
 
     def test_recent_requests_keep_three_rows_including_repeated_models(self):
@@ -564,8 +567,9 @@ class RelayDataPathTest(_RelayTestBase):
         self._serve(upstream)
         for model in ("oldest", "repeat", "middle", "repeat"):
             self.assertEqual(self._post_chat({"model": model})[0], 200)
-            self.assertEqual(self._wait_latest(model), ("", ""))
-        self.assertEqual(self._recent(), [("repeat", "", ""), ("middle", "", ""), ("repeat", "", "")])
+            self.assertEqual(self._wait_latest(model), ("", "", ""))
+        self.assertEqual(self._recent(), [("repeat", "", "", ""), ("middle", "", "", ""),
+                                          ("repeat", "", "", "")])
 
     def test_reasoning_and_stream_trailers_do_not_reduce_output_rate(self):
         for usage in (
@@ -576,14 +580,14 @@ class RelayDataPathTest(_RelayTestBase):
                 stream = self.proxy.StreamUsage()
                 stream.feed(b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n', 1.0)
                 stream.feed(b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n', 2.0)
-                self.assertEqual(stream.metrics(0.0), (None, None))
+                self.assertEqual(stream.metrics(0.0), (None, None, None))
                 stream.feed(b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n', 8.0)
                 stream.feed(b'data: {"choices":[{"delta":{"content":"last"}}]}\n\n', 10.0)
                 stream.feed(b'data: ' + json.dumps({"usage": usage}).encode() + b"\n\n", 12.0)
                 stream.feed(b"data: [DONE]\n\n", 13.0)
-                self.assertEqual(stream.metrics(0.0), (49.0, 8.0))
+                self.assertEqual(stream.metrics(0.0), (49.0, 8.0, 2.0))
 
-    def test_unseparated_reasoning_and_coalesced_output_keep_ttft_only(self):
+    def test_receive_duration_is_available_without_separate_reasoning_counts(self):
         frames = [
             b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
             b'data: {"choices":[{"delta":{"content":"last"}}]}\n\n',
@@ -593,13 +597,13 @@ class RelayDataPathTest(_RelayTestBase):
              (2.0, frames[0]), (3.0, frames[1])],
             [(2.0, b"".join(frames))],
         ]
-        for events in scenarios:
+        for events, duration in zip(scenarios, (1.0, None)):
             with self.subTest(events=events):
                 stream = self.proxy.StreamUsage()
                 for timestamp, data in events:
                     stream.feed(data, timestamp)
                 stream.feed(b'data: {"usage":{"completion_tokens":24}}\n\n', 4.0)
-                self.assertEqual(stream.metrics(0.0), (None, 2.0))
+                self.assertEqual(stream.metrics(0.0), (None, 2.0, duration))
 
     def test_submillisecond_output_arrivals_keep_the_calculated_rate(self):
         stream = self.proxy.StreamUsage()
@@ -608,7 +612,7 @@ class RelayDataPathTest(_RelayTestBase):
         usage = {"prompt_tokens": 2341, "completion_tokens": 10,
                  "completion_tokens_details": {"reasoning_tokens": 0}}
         stream.feed(b"data: " + json.dumps({"usage": usage}).encode() + b"\n\n", 2.5)
-        self.assertEqual(stream.metrics(0.0), (73728.0, 2.0))
+        self.assertEqual(stream.metrics(0.0), (73728.0, 2.0, 1 / 8192))
 
     def test_stream_metrics_for_messages_and_responses(self):
         fixtures = [
@@ -634,7 +638,7 @@ class RelayDataPathTest(_RelayTestBase):
                 parser = self.proxy.StreamUsage()
                 for timestamp, chunk in enumerate(chunks, start=1):
                     parser.feed(chunk, timestamp)
-                self.assertEqual(parser.metrics(0.0), (expected_rate, 2.0))
+                self.assertEqual(parser.metrics(0.0), (expected_rate, 2.0, 1.0))
 
                 upstream = self._start_upstream(modes=["sse"], sse_chunks=chunks)
                 self._serve(upstream)
@@ -642,7 +646,8 @@ class RelayDataPathTest(_RelayTestBase):
                 status, _, result = self._request(
                     "POST", path, body, {"Content-Type": "application/json"})
                 self.assertEqual((status, result), (200, b"".join(chunks)))
-                rate, ttft = self._wait_latest("native-stream")
+                rate, ttft, duration = self._wait_latest("native-stream")
+                self.assertGreater(float(duration), 0.0)
                 self.assertGreater(float(rate), 0.0)
                 self.assertGreaterEqual(float(ttft), 0.0)
                 self.assertEqual(upstream.requests[0]["body"], body)
